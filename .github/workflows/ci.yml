@@ -50,16 +50,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Check for stale "Windows Toolbox" references
+      - name: Check for stale legacy-name references
+        # ci.yml, verify-release.ps1, and CLAUDE.md legitimately contain the word
+        # in their own check logic or rules, so they are excluded by name.
         run: |
-          if grep -rn "Windows Toolbox" . \
+          if grep -rniw "toolbox" . \
             --include="*.py" --include="*.jsx" --include="*.js" \
             --include="*.json" --include="*.toml" --include="*.yml" \
-            --include="*.iss" --include="*.spec" \
+            --include="*.iss" --include="*.spec" --include="*.md" \
+            --include="*.ps1" --include="*.txt" \
             --exclude-dir=node_modules --exclude-dir=.git \
             --exclude-dir=dist --exclude-dir=build \
-            --exclude-dir=.planning --exclude-dir=.github; then
-            echo "ERROR: Found stale 'Windows Toolbox' references"
+            --exclude-dir=.planning --exclude-dir=.venv \
+            --exclude=ci.yml --exclude=verify-release.ps1 --exclude=CLAUDE.md; then
+            echo "ERROR: Found stale legacy-name references"
             exit 1
           fi
           echo "OK: No stale references found"
@@ -70,8 +74,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check version consistency (config.py vs package.json)
         run: |
-          PY_VERSION=$(grep -oP '(?<=APP_VERSION = ")[^"]+' virelo/app/config.py)
-          PKG_VERSION=$(grep -oP '(?<="version": ")[^"]+' frontend/package.json)
+          PY_VERSION=$(grep -oP 'APP_VERSION\s*=\s*"\K[^"]+' virelo/app/config.py)
+          PKG_VERSION=$(grep -oP '"version"\s*:\s*"\K[^"]+' frontend/package.json | head -n1)
           echo "config.py APP_VERSION:  $PY_VERSION"
           echo "package.json version:   $PKG_VERSION"
           if [ "$PY_VERSION" != "$PKG_VERSION" ]; then
@@ -79,3 +83,12 @@ jobs:
             exit 1
           fi
           echo "OK: Versions match ($PY_VERSION)"
+      - name: Check pyproject.toml keeps the version dynamic
+        # The package version must resolve from virelo/app/config.py, the single
+        # source of truth. A static version in pyproject.toml would reintroduce drift.
+        run: |
+          if ! grep -q 'dynamic = \["version"\]' pyproject.toml; then
+            echo 'ERROR: pyproject.toml must declare dynamic = ["version"] so the version derives from virelo/app/config.py'
+            exit 1
+          fi
+          echo "OK: pyproject.toml version is dynamic"
