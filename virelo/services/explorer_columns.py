@@ -157,8 +157,10 @@ def _get_com_identity(dispatch: object) -> int:
     """
     try:
         unk = dispatch.QueryInterface(IUnknown)
-        # The IUnknown pointer value is the COM identity
-        return id(unk) ^ hash(unk)
+        # COM identity rule: two references address the same object when their
+        # IUnknown pointer values are equal. The wrapper releases its reference
+        # on GC; only the raw address is kept.
+        return int(cast(unk, c_void_p).value or 0)
     except Exception:
         # Fallback: use Python object id
         return id(dispatch)
@@ -251,40 +253,6 @@ def iter_shell_windows(logger: logging.Logger) -> Iterable[ShellWindow]:
             continue
 
 
-def _get_foreground_hwnd() -> int:
-    """Get the current foreground window handle."""
-    try:
-        user32 = ctypes.windll.user32
-        return user32.GetForegroundWindow()
-    except Exception:
-        return 0
-
-
-def _get_focus_hwnd() -> int:
-    """Get the window that has keyboard focus."""
-    try:
-        user32 = ctypes.windll.user32
-        thread_id = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-        gui_info = ctypes.create_string_buffer(48)  # GUITHREADINFO structure
-        ctypes.memset(gui_info, 0, 48)
-        ctypes.memmove(gui_info, ctypes.c_uint32(48).value.to_bytes(4, "little"), 4)
-        if user32.GetGUIThreadInfo(thread_id, gui_info):
-            focus_hwnd = int.from_bytes(gui_info[8:16], "little")
-            return focus_hwnd
-    except Exception:
-        pass
-    return 0
-
-
-def _is_child_of(child_hwnd: int, parent_hwnd: int) -> bool:
-    """Check if child_hwnd is a descendant of parent_hwnd."""
-    try:
-        user32 = ctypes.windll.user32
-        return bool(user32.IsChild(parent_hwnd, child_hwnd))
-    except Exception:
-        return False
-
-
 def iter_explorer_tabs(logger: logging.Logger) -> Iterable[ShellWindow]:
     """
     Iterate all Explorer tabs, yielding each as a ShellWindow with tab_id.
@@ -324,16 +292,6 @@ def find_active_tab_for_hwnd(logger: logging.Logger, hwnd: int) -> ShellWindow |
         len(candidates),
         hwnd,
     )
-
-    # Try to determine which tab is active via focus
-    foreground = _get_foreground_hwnd()
-    if foreground == hwnd:
-        # This window is foreground; try to find which tab has focus
-        focus_hwnd = _get_focus_hwnd()
-        if focus_hwnd:
-            logger.debug("find_active_tab_for_hwnd: focus_hwnd=%s", focus_hwnd)
-            # Unfortunately we can't directly map focus to a tab's COM object,
-            # but we can check if the focused element is in a view for that window
 
     # Heuristic: prefer tabs in details view with non-empty paths
     scored = []
@@ -599,10 +557,11 @@ def autosize_visible_columns_for_dispatch(
                 logger.debug("Autosize finished using source=%s.", source_name)
                 return (attempted, succeeded)
             finally:
-                try:
-                    cm.Release()
-                except Exception:
-                    pass
+                # Ownership note: QueryService returned exactly one reference,
+                # and the comtypes pointer created by cast() releases it when
+                # the wrapper is garbage collected. An explicit Release() here
+                # would over-release the proxy by one.
+                del cm
         except BaseException as e:
             last_error = e
             logger.debug("Autosize failed using source=%s. Error was: %r", source_name, e)
@@ -662,7 +621,13 @@ def apply_to_window(
     sw: ShellWindow,
     require_details: bool,
     dump_columns: bool,
-) -> tuple[int, int]:
+) -> tuple[int, int, int | None]:
+    """Autosize one window's columns. Returns (attempted, succeeded, view_mode).
+
+    The view mode is returned so callers can distinguish "skipped because the
+    view is not Details" (permanent until the user changes the view) from a
+    genuine failure worth retrying.
+    """
     mode, name, err = get_view_mode_from_document(sw.dispatch)
     if mode is not None:
         logger.info("HWND %d, Document view %d (%s), URL %s.", sw.hwnd, mode, name, sw.location_url)
@@ -670,8 +635,11 @@ def apply_to_window(
         logger.info("HWND %d, Document view UNKNOWN, %s, URL %s.", sw.hwnd, err, sw.location_url)
     if require_details and mode is not None and mode != FVM_DETAILS:
         logger.info("Skip HWND %d, effective view was %d (%s).", sw.hwnd, mode, name)
-        return (0, 0)
-    return autosize_visible_columns_for_dispatch(logger, sw.dispatch, dump_columns=dump_columns)
+        return (0, 0, mode)
+    attempted, succeeded = autosize_visible_columns_for_dispatch(
+        logger, sw.dispatch, dump_columns=dump_columns
+    )
+    return (attempted, succeeded, mode)
 
 
 def autosize_explorer_columns(
@@ -711,18 +679,21 @@ def autosize_explorer_columns(
                 hwnd,
                 target_path,
             )
-            return False, "none"
-        attempted, succeeded = apply_to_window(
+            return False, "not-found"
+        attempted, succeeded, mode = apply_to_window(
             LOG,
             sw,
             require_details=require_details,
             dump_columns=dump_columns,
         )
+        if require_details and mode is not None and mode != FVM_DETAILS:
+            # Not a failure to retry: the view simply is not Details.
+            return False, "not-details"
         ok = attempted > 0 and succeeded > 0
         return (ok, "com" if ok else "none")
     except BaseException as e:
         LOG.debug("autosize_explorer_columns: exception: %r", e, exc_info=True)
-        return False, "none"
+        return False, "error"
     finally:
         if not caller_owns_com:
             try:
@@ -803,7 +774,7 @@ def autosize_explorer_columns_detailed(
                     ),
                 )
 
-        attempted, succeeded = apply_to_window(
+        attempted, succeeded, _ = apply_to_window(
             LOG,
             sw,
             require_details=require_details,

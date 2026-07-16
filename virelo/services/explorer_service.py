@@ -6,9 +6,8 @@ per Phase 3 D-07 constraint.
 """
 
 import logging
-import time
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore
 
 from virelo.platform.win32_helpers import _is_window_interactive
 from virelo.services.explorer_columns import autosize_explorer_columns
@@ -72,48 +71,30 @@ class ExplorerService:
         If the setting is disabled, stops any running worker instead.
         If a worker is already running, this is a no-op.
         """
-        LOG.info("ExplorerService.start: called")
-        app = QtWidgets.QApplication.instance()
-        pushed_cursor = False
-        if app is not None:
-            QtGui.QGuiApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
-            pushed_cursor = True
-        try:
-            group_enabled = bool(self._settings.ex_auto_size)
-            LOG.info("ExplorerService.start: group_enabled=%s", group_enabled)
-            if not group_enabled:
+        if not bool(self._settings.ex_auto_size):
+            if self.is_running():
                 LOG.info("Explorer autosize: stopping (disabled).")
                 self.stop()
-                return
+            return
 
-            if self._thread and self._thread.isRunning():
-                LOG.info("Explorer autosize: worker already running.")
-                return
+        if self._thread and self._thread.isRunning():
+            return
 
-            LOG.setLevel(logging.DEBUG)
-            LOG.info("Explorer autosize: enabling DEBUG logging for troubleshooting")
-
-            self._thread = QtCore.QThread(self._parent)
-            self._worker = ExplorerAutosizeWorker(
-                _autosize_explorer_columns_quick,
-                _autosize_explorer_columns_full,
-                _is_window_interactive,
-                schedule=(0.05, 0.1, 0.25, 0.5, 1.0),
-            )
-            self._worker.moveToThread(self._thread)
-            self._thread.started.connect(self._worker.run)
-            self._worker.finished.connect(self._thread.quit)
-            self._worker.finished.connect(self._worker.deleteLater)
-            self._thread.finished.connect(self._thread.deleteLater)
-            self._thread.finished.connect(self._on_finished)
-            self._thread.start()
-            LOG.info(
-                "Explorer autosize: worker started with tab-aware engine, "
-                "schedule=(0.05, 0.1, 0.25, 0.5, 1.0)"
-            )
-        finally:
-            if pushed_cursor:
-                QtGui.QGuiApplication.restoreOverrideCursor()
+        self._thread = QtCore.QThread(self._parent)
+        self._worker = ExplorerAutosizeWorker(
+            _autosize_explorer_columns_quick,
+            _autosize_explorer_columns_full,
+            _is_window_interactive,
+            schedule=(0.05, 0.1, 0.25, 0.5, 1.0),
+        )
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.finished.connect(self._worker.deleteLater)
+        self._thread.finished.connect(self._thread.deleteLater)
+        self._thread.finished.connect(self._on_finished)
+        self._thread.start()
+        LOG.info("Explorer autosize: worker started with tab-aware engine")
 
     def stop(self):
         """Stop the explorer worker cleanly."""
@@ -124,7 +105,6 @@ class ExplorerService:
                 worker.stop()
             except Exception:
                 pass
-            time.sleep(0.05)
         if thread is not None:
             thread.quit()
             if not thread.wait(3000):
@@ -138,6 +118,12 @@ class ExplorerService:
         return self._thread is not None and self._thread.isRunning()
 
     def _on_finished(self):
-        """Internal callback when the worker thread finishes."""
+        """Internal callback when a worker thread finishes.
+
+        Only clears references when the finishing thread is the current one,
+        so a stale queued signal cannot null out a newer worker.
+        """
+        if self._thread is not None and self._thread.isRunning():
+            return
         self._worker = None
         self._thread = None

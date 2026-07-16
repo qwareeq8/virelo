@@ -10,6 +10,7 @@ COM Threading Constraint (D-07):
     single file.  Do NOT separate COM init from COM usage.
 """
 
+import logging
 import threading
 import time
 import urllib.parse
@@ -17,6 +18,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from virelo.platform.paths import canonicalize_path
+
+LOG = logging.getLogger("Virelo")
 
 # Rate limiting constants
 MIN_AUTOSIZE_INTERVAL_PER_TAB_MS = 200  # Minimum ms between autosize attempts per tab
@@ -219,6 +222,12 @@ class ExplorerAutosizeEngine:
         self.window_state: dict[int, dict] = {}
         self.pending: dict[int, dict] = {}
 
+        # Idle backoff: poll fast only while the Explorer window set is
+        # actually changing; a resident tray app must not enumerate COM
+        # windows 6+ times per second around the clock.
+        self._last_activity = 0.0
+        self._prev_live_keys: set = set()
+
     def _next_token(self) -> int:
         """Generate the next navigation token."""
         self._token_counter += 1
@@ -293,9 +302,7 @@ class ExplorerAutosizeEngine:
         Returns:
             Recommended delay before next step
         """
-        import logging
-
-        log = logging.getLogger("Virelo")
+        log = LOG
 
         # Periodically clean dedupe cache
         self._clean_dedupe_cache(now)
@@ -311,7 +318,6 @@ class ExplorerAutosizeEngine:
 
         # Track live tabs by (hwnd, path) - this is the stable identity
         live_tab_keys = set()
-        live_hwnds = set()
 
         for tab_info in tabs:
             # Unpack tab info: (hwnd, tab_id, path, view_mode, [dispatch])
@@ -336,7 +342,6 @@ class ExplorerAutosizeEngine:
             # Use (hwnd, canonical_path) as stable identity key
             tab_key = (hwnd, canonical_path)
             live_tab_keys.add(tab_key)
-            live_hwnds.add(hwnd)
 
             # Get or create tab state using the stable key
             state = self.tab_state.get(tab_key)
@@ -589,6 +594,12 @@ class ExplorerAutosizeEngine:
             if state.pending_retry
         }
 
+        # Record activity whenever the set of open tabs or their paths changed.
+        # Startup counts as activity so a freshly enabled worker responds fast.
+        if self._last_activity == 0.0 or live_tab_keys != self._prev_live_keys:
+            self._last_activity = now
+            self._prev_live_keys = set(live_tab_keys)
+
         return self._next_delay(now)
 
     def _next_delay(self, now: float) -> float:
@@ -597,8 +608,15 @@ class ExplorerAutosizeEngine:
         pending_tabs = [s for s in self.tab_state.values() if s.pending_retry]
 
         if not pending_tabs:
-            # No pending work, use a slower poll rate
-            return 0.15
+            # No pending work: decay the poll rate with inactivity. The cost
+            # of a poll is a full cross-process COM enumeration, so idle
+            # cadence matters more than first-detection latency.
+            idle = now - self._last_activity
+            if idle < 5.0:
+                return 0.15
+            if idle < 30.0:
+                return 0.5
+            return 1.0
 
         # Find the soonest pending retry
         next_due = min(s.next_retry_at for s in pending_tabs)
@@ -673,10 +691,25 @@ if QtCore is not None:
             self._is_window_interactive = is_window_interactive
             self._schedule = schedule if schedule else self.DEFAULT_SCHEDULE
             self._stop = threading.Event()
+            # Win32 event mirrored with _stop so the worker's message wait can
+            # wake immediately on stop instead of polling a Python flag.
+            try:
+                import win32event
+
+                self._stop_win32_event = win32event.CreateEvent(None, True, False, None)
+            except Exception:  # pragma: no cover - pywin32 absent off-Windows
+                self._stop_win32_event = None
 
         def stop(self):
             """Signal the worker to stop."""
             self._stop.set()
+            if self._stop_win32_event is not None:
+                try:
+                    import win32event
+
+                    win32event.SetEvent(self._stop_win32_event)
+                except Exception:
+                    pass
 
         @QtCore.Slot()
         def run(self):
@@ -694,6 +727,9 @@ if QtCore is not None:
             import pythoncom
             import pywintypes
             import win32com.client
+            import win32con
+            import win32event
+            import win32gui
 
             log = logging.getLogger("Virelo")
             log.info("Explorer autosize worker: initializing COM once per thread (STA)...")
@@ -706,18 +742,32 @@ if QtCore is not None:
                 pythoncom.CoInitialize()
             log.info("Explorer autosize worker: COM initialized (STA)")
 
-            # Cache Shell.Application to avoid creating/destroying it every poll cycle
-            # This is critical for avoiding RPC errors (0x80010108, 0x800706b5)
-            shell_app = None
-            try:
-                shell_app = win32com.client.Dispatch("Shell.Application")
-                log.info("Explorer autosize worker: Shell.Application cached")
-            except Exception as e:
-                log.error("Explorer autosize worker: failed to create Shell.Application: %s", e)
-                # Continue without it - iter_tabs will return empty list
+            # Cache Shell.Application to avoid creating/destroying it every poll
+            # cycle (avoids RPC errors 0x80010108, 0x800706b5). A creation
+            # failure is retried with a cooldown instead of disabling the
+            # feature for the process lifetime.
+            shell_state = {"app": None, "retry_at": 0.0}
+
+            def ensure_shell_app():
+                if shell_state["app"] is not None:
+                    return shell_state["app"]
+                if time.time() < shell_state["retry_at"]:
+                    return None
+                try:
+                    shell_state["app"] = win32com.client.Dispatch("Shell.Application")
+                    log.info("Explorer autosize worker: Shell.Application cached")
+                except Exception as e:
+                    shell_state["retry_at"] = time.time() + 30.0
+                    log.warning(
+                        "Explorer autosize worker: Shell.Application creation failed "
+                        "(retrying in 30s): %s",
+                        e,
+                    )
+                return shell_state["app"]
+
+            ensure_shell_app()
 
             try:
-                import pywintypes
 
                 def _get_view_mode(w) -> int | None:
                     """Get view mode safely, returning None if not available."""
@@ -744,13 +794,12 @@ if QtCore is not None:
                     IMPORTANT: This function checks the stop flag aggressively before
                     every COM call to avoid RPC failures during shutdown.
                     """
-                    import pythoncom
-                    import pywintypes
 
                     # Helper to check stop flag - must be checked before EVERY COM call
                     def stopping():
                         return self._stop.is_set()
 
+                    shell_app = None if stopping() else ensure_shell_app()
                     # Exit early if we are stopping to avoid COM calls during teardown
                     if stopping() or shell_app is None:
                         return []
@@ -818,23 +867,6 @@ if QtCore is not None:
                             break
 
                         try:
-                            # Access Name attribute safely - check stop first
-                            if stopping():
-                                break
-                            try:
-                                name = w.Name
-                            except (
-                                pywintypes.com_error,
-                                pythoncom.com_error,
-                                OSError,
-                                AttributeError,
-                                Exception,
-                            ):
-                                continue
-
-                            if not isinstance(name, str) or "explorer" not in name.lower():
-                                continue
-
                             if stopping():
                                 break
                             try:
@@ -849,6 +881,19 @@ if QtCore is not None:
                                 continue
 
                             if not hwnd:
+                                continue
+
+                            # Filter to real Explorer windows by window class.
+                            # Cheaper than the Name property (no cross-process
+                            # COM call) and immune to lookalikes such as
+                            # Internet Explorer.
+                            try:
+                                if win32gui.GetClassName(hwnd) not in (
+                                    "CabinetWClass",
+                                    "ExploreWClass",
+                                ):
+                                    continue
+                            except Exception:
                                 continue
 
                             if stopping():
@@ -893,7 +938,7 @@ if QtCore is not None:
                     # Proactively drop COM references before returning
                     window_list.clear()
                     windows = None
-                    # Don't release shell_app - it's cached and owned by the worker thread
+                    # The cached Shell.Application stays owned by the worker thread.
 
                     return out
 
@@ -910,8 +955,10 @@ if QtCore is not None:
                         )
                         if isinstance(result, tuple) and len(result) >= 2:
                             ok, method = result[:2]
-                            # Detect transient errors based on method
-                            is_transient = not ok and method in ("none", "error")
+                            # "not-details" is permanent until the user changes
+                            # the view; retrying it five times per navigation
+                            # is pure COM churn.
+                            is_transient = not ok and method in ("none", "error", "not-found")
                             return (ok, method, is_transient)
                         return (bool(result), "unknown" if result else "none", True)
                     except Exception as e:
@@ -936,7 +983,7 @@ if QtCore is not None:
                         )
                         if isinstance(result, tuple) and len(result) >= 2:
                             ok, method = result[:2]
-                            is_transient = not ok and method in ("none", "error")
+                            is_transient = not ok and method in ("none", "error", "not-found")
                             return (ok, method, is_transient)
                         return (bool(result), "unknown" if result else "none", True)
                     except Exception as e:
@@ -993,21 +1040,39 @@ if QtCore is not None:
                     except Exception:
                         pass
 
-                    # Interruptible sleep with continued message pumping
-                    end = time.time() + sleep_for
-                    while time.time() < end:
-                        if self._stop.is_set():
+                    # Sleep without spinning: MsgWaitForMultipleObjects wakes
+                    # only for the stop event, an incoming window message
+                    # (pumped for the STA), or the timeout. The old loop woke
+                    # 200 times per second around the clock.
+                    deadline = time.time() + sleep_for
+                    while not self._stop.is_set():
+                        remaining_ms = int((deadline - time.time()) * 1000)
+                        if remaining_ms <= 0:
                             break
-                        # Pump messages during sleep
+                        if self._stop_win32_event is None:
+                            time.sleep(min(0.05, remaining_ms / 1000.0))
+                            continue
+                        rc = win32event.MsgWaitForMultipleObjects(
+                            [self._stop_win32_event],
+                            False,
+                            remaining_ms,
+                            win32con.QS_ALLINPUT,
+                        )
+                        if rc == win32event.WAIT_OBJECT_0:
+                            break  # Stop requested.
+                        if rc == win32event.WAIT_TIMEOUT:
+                            break  # Slept the full delay.
+                        # rc == WAIT_OBJECT_0 + 1: window messages are pending.
                         try:
-                            pythoncom.PumpWaitingMessages()
+                            if pythoncom.PumpWaitingMessages():
+                                self._stop.set()  # WM_QUIT
+                                break
                         except Exception:
                             pass
-                        time.sleep(0.005)
             finally:
                 # CRITICAL: Release all COM objects BEFORE uninitializing COM
                 # This prevents crashes from lingering COM references
-                shell_app = None
+                shell_state["app"] = None
                 try:
                     pythoncom.CoUninitialize()
                 except Exception:
