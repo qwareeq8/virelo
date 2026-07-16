@@ -43,3 +43,8 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: 
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+; The HKCU settings registry key is intentionally preserved so user settings survive an uninstall.
+Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
+Type: files; Name: "{userstartup}\{#MyAppName}.lnk"
