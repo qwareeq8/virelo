@@ -13,6 +13,22 @@ LOG = logging.getLogger("Virelo")
 USER32 = ctypes.windll.user32
 KERNEL32 = ctypes.windll.kernel32
 
+# Explicit signatures for the calls we use with window handles. Without a
+# restype, ctypes truncates HWNDs to a signed 32-bit int, which breaks
+# equality checks against Qt's unsigned winId().
+USER32.GetForegroundWindow.restype = wintypes.HWND
+USER32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+USER32.GetWindowRect.restype = wintypes.BOOL
+USER32.MoveWindow.argtypes = [
+    wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    wintypes.BOOL,
+]
+USER32.MoveWindow.restype = wintypes.BOOL
+
 LVM_FIRST = 0x1000
 LVM_GETHEADER = LVM_FIRST + 31
 LVM_GETITEMCOUNT = LVM_FIRST + 4

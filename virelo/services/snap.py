@@ -22,12 +22,31 @@ from virelo.app.config import normalize_snap_presses
 from virelo.platform.win32_helpers import (
     USER32,
     _exit_fullscreen,
+    _get_window_dwm_rect,
     _is_window_fullscreen,
     _should_skip_snap_for_game,
     get_monitor_rect,
 )
 
 LOG = logging.getLogger("Virelo")
+
+
+def window_border_deltas(
+    win_rect: tuple[int, int, int, int],
+    visible_rect: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int]:
+    """Return (left, top, right, bottom) invisible-border widths.
+
+    DWM windows extend past their visible frame; centering on the raw window
+    rect leaves the window visually off-center. Deltas are clamped to a sane
+    range so a bogus DWM answer cannot fling the window off-screen.
+    """
+    if visible_rect is None:
+        return (0, 0, 0, 0)
+    wl, wt, wr, wb = win_rect
+    vl, vt, vr, vb = visible_rect
+    clamp = lambda v: max(0, min(64, v))  # noqa: E731
+    return (clamp(vl - wl), clamp(vt - wt), clamp(wr - vr), clamp(wb - vb))
 
 
 def calculate_snap_position(
@@ -59,6 +78,7 @@ class MultiPressHotkeyListener(QtCore.QObject):
         )
         self._press_lock = threading.Lock()
         self._held = False
+        self._last_press_event = 0.0
         self.current_key = str(settings.snap_key)
         self.restore_key = str(getattr(settings, "restore_key", "ctrl"))
         self._press_hook = keyboard.on_press_key(self.current_key, self._on_press)
@@ -73,6 +93,7 @@ class MultiPressHotkeyListener(QtCore.QObject):
             keyboard.unhook(self._release_hook)
         except Exception:
             pass
+        self._held = False
 
     def update_binding(self, new_key: str):
         try:
@@ -83,6 +104,9 @@ class MultiPressHotkeyListener(QtCore.QObject):
             keyboard.unhook(self._release_hook)
         except Exception:
             pass
+        # The old release hook is gone; a key physically held through the swap
+        # would otherwise leave _held stuck True forever.
+        self._held = False
         self.current_key = new_key
         self._press_hook = keyboard.on_press_key(self.current_key, self._on_press)
         self._release_hook = keyboard.on_release_key(self.current_key, self._on_release)
@@ -102,9 +126,15 @@ class MultiPressHotkeyListener(QtCore.QObject):
     def _on_press(self, event):
         if not self.settings.enable_snap:
             return
+        now = time.time()
+        # Recover from a lost release event (focus steal, UAC prompt, session
+        # switch). A genuinely held key produces auto-repeat press events well
+        # under a second apart, so a long-silent "held" state is stale.
+        if self._held and now - self._last_press_event > 1.0:
+            self._held = False
+        self._last_press_event = now
         if not self._held:
             self._held = True
-            now = time.time()
             interval = int(self.settings.snap_interval) / 1000.0
             press_target = normalize_snap_presses(self.settings.snap_presses)
             should_trigger = False
@@ -193,12 +223,29 @@ class SnapRestoreController(QtCore.QObject):
         for hwnd in stale:
             self._orig_sizes.pop(hwnd, None)
 
+    # Shell windows that must never be moved or resized.
+    _SHELL_CLASSES = frozenset(
+        {
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "Progman",
+            "WorkerW",
+            "NotifyIconOverflowWindow",
+        }
+    )
+
     @QtCore.Slot(bool)
     def perform(self, restore: bool):
         self._prune_closed_windows()
         hwnd = USER32.GetForegroundWindow()
         if not hwnd:
             return
+        try:
+            if win32gui.GetClassName(hwnd) in self._SHELL_CLASSES:
+                LOG.debug("Snap: skipping shell window hwnd=%s", hwnd)
+                return
+        except Exception:
+            pass
         try:
             if restore:
                 self._restore(hwnd)
@@ -234,8 +281,10 @@ class SnapRestoreController(QtCore.QObject):
         if not mon_full:
             return
 
-        # Check if window is fullscreen using full monitor bounds
-        full_screen = _is_window_fullscreen(hwnd, rect=rc, monitor_rect=mon_full)
+        # Check if window is fullscreen using full monitor bounds. Let the
+        # helper fetch the DWM extended frame itself: the raw window rect
+        # includes invisible borders that defeat the tolerance check.
+        full_screen = _is_window_fullscreen(hwnd, monitor_rect=mon_full)
 
         # Skip snapping if game mode enabled and window is fullscreen borderless
         if _should_skip_snap_for_game(hwnd, self.settings, full_screen):
@@ -263,16 +312,20 @@ class SnapRestoreController(QtCore.QObject):
             placement = win32gui.GetWindowPlacement(hwnd)
             if placement[1] == win32con.SW_MAXIMIZE:
                 win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-            w = int(monitor_width * int(self.settings.width_pct) // 100)
-            h = int(monitor_height * int(self.settings.height_pct) // 100)
-            x = left_edge + ((monitor_width - w) // 2)
-            y = top_edge + ((monitor_height - h) // 2)
-            if (rc.right - rc.left, rc.bottom - rc.top, rc.left, rc.top) != (
-                w,
-                h,
-                x,
-                y,
-            ):
+                rc = refresh_rect()
+            # Center the VISIBLE frame: size the visible box to the requested
+            # percentages, then widen the window rect by the invisible DWM
+            # borders and shift left/up so the visible frame lands centered.
+            visible_w = int(monitor_width * int(self.settings.width_pct) // 100)
+            visible_h = int(monitor_height * int(self.settings.height_pct) // 100)
+            border_l, border_t, border_r, border_b = window_border_deltas(
+                (rc.left, rc.top, rc.right, rc.bottom), _get_window_dwm_rect(hwnd)
+            )
+            w = visible_w + border_l + border_r
+            h = visible_h + border_t + border_b
+            x = left_edge + ((monitor_width - visible_w) // 2) - border_l
+            y = top_edge + ((monitor_height - visible_h) // 2) - border_t
+            if (rc.right - rc.left, rc.bottom - rc.top, rc.left, rc.top) != (w, h, x, y):
                 USER32.MoveWindow(hwnd, int(x), int(y), int(w), int(h), True)
         else:
             w = max(660, int(monitor_width * 0.35))
@@ -297,10 +350,6 @@ class SnapRestoreController(QtCore.QObject):
         if not mon:
             return
         left_edge, top_edge, right_edge, bottom_edge = mon
-        monitor_width, monitor_height = (
-            right_edge - left_edge,
-            bottom_edge - top_edge,
-        )
 
         rc = wintypes.RECT()
         USER32.GetWindowRect(hwnd, ctypes.byref(rc))
@@ -317,9 +366,11 @@ class SnapRestoreController(QtCore.QObject):
             win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
         else:
             left, top, width, height = rect
-            x = left_edge + ((monitor_width - width) // 2)
-            y = top_edge + ((monitor_height - height) // 2)
-            USER32.MoveWindow(hwnd, x, y, width, height, True)
+            # Return the window to its captured position, clamped so it stays
+            # reachable on the current monitor (it may have changed since).
+            x = max(left_edge, min(left, right_edge - width))
+            y = max(top_edge, min(top, bottom_edge - height))
+            USER32.MoveWindow(hwnd, int(x), int(y), int(width), int(height), True)
 
 
 class SnapService:
