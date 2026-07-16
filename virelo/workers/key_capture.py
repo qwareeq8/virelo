@@ -33,9 +33,10 @@ class KeyCaptureSession:
         self._reason = None
         self._done.clear()
         self._stop.clear()
-        hook_id = self._keyboard.hook(self._on_event)
+        hook_id = None
         start = time.monotonic()
         try:
+            hook_id = self._keyboard.hook(self._on_event)
             while not self._done.is_set():
                 if self._stop.is_set():
                     if self._reason is None:
@@ -45,11 +46,15 @@ class KeyCaptureSession:
                     self._reason = "timeout"
                     break
                 self._done.wait(self._poll_interval)
+        except Exception:
+            LOG.exception("Key capture hook failed")
+            self._reason = "error"
         finally:
-            try:
-                self._keyboard.unhook(hook_id)
-            except Exception:
-                pass
+            if hook_id is not None:
+                try:
+                    self._keyboard.unhook(hook_id)
+                except Exception:
+                    pass
         if self._reason is None:
             self._reason = "captured" if self._result else "stopped"
         return self._result, self._reason
@@ -99,12 +104,19 @@ if QtCore is not None:
 
         @QtCore.Slot()
         def run(self):
-            key, reason = self._session.run()
-            if key:
-                self.captured.emit(key)
-            else:
-                self.cancelled.emit(reason)
-            self.finished.emit()
+            # finished must ALWAYS emit or the CaptureGuard stays locked and
+            # the capture QThread never quits.
+            try:
+                key, reason = self._session.run()
+                if key:
+                    self.captured.emit(key)
+                else:
+                    self.cancelled.emit(reason)
+            except Exception:
+                LOG.exception("Key capture session crashed")
+                self.cancelled.emit("error")
+            finally:
+                self.finished.emit()
 
         def stop(self):
             self._session.stop()
