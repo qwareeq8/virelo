@@ -169,8 +169,11 @@ class SnapRestoreController(QtCore.QObject):
     def __init__(self, settings):
         super().__init__()
         self.settings = settings
+        # Original geometry is captured at snap time (in _snap), not at
+        # startup. Pre-populating here would make restore return a window to
+        # wherever it happened to be when Virelo launched, not to where it was
+        # right before the user snapped it.
         self._orig_sizes: dict[int, dict[str, tuple[int, int, int, int] | bool]] = {}
-        self._fetch_open_windows()
 
     def _fetch_open_windows(self):
         def enum_windows_callback(hwnd, _):
@@ -235,32 +238,33 @@ class SnapRestoreController(QtCore.QObject):
     )
 
     @QtCore.Slot(bool)
-    def perform(self, restore: bool):
+    def perform(self, restore: bool) -> bool:
+        """Snap or restore the foreground window. Returns True if it acted."""
         self._prune_closed_windows()
         hwnd = USER32.GetForegroundWindow()
         if not hwnd:
-            return
+            return False
         try:
             if win32gui.GetClassName(hwnd) in self._SHELL_CLASSES:
                 LOG.debug("Snap: skipping shell window hwnd=%s", hwnd)
-                return
+                return False
         except Exception:
             pass
         try:
             if restore:
-                self._restore(hwnd)
-            else:
-                self._snap(hwnd)
+                return bool(self._restore(hwnd))
+            return bool(self._snap(hwnd))
         except Exception as e:
             LOG.exception("SnapRestoreController.perform failed.", exc_info=e)
+            return False
 
-    def _snap(self, hwnd: int):
+    def _snap(self, hwnd: int) -> bool:
         from PySide6 import QtWidgets
 
         for widget in QtWidgets.QApplication.topLevelWidgets():
             if int(widget.winId()) == hwnd:
                 LOG.debug("Snap: skipping Virelo's own window hwnd=%s", hwnd)
-                return  # Skip entirely per SNAP-03
+                return False  # Skip entirely per SNAP-03
 
         def refresh_rect():
             rect = wintypes.RECT()
@@ -279,7 +283,7 @@ class SnapRestoreController(QtCore.QObject):
         # Get full monitor bounds for accurate fullscreen detection
         mon_full = get_monitor_rect(hwnd, use_work_area=False)
         if not mon_full:
-            return
+            return False
 
         # Check if window is fullscreen using full monitor bounds. Let the
         # helper fetch the DWM extended frame itself: the raw window rect
@@ -290,12 +294,12 @@ class SnapRestoreController(QtCore.QObject):
         if _should_skip_snap_for_game(hwnd, self.settings, full_screen):
             LOG.info("Game mode: skipped snap for fullscreen window hwnd=%s", hwnd)
             self.blocked.emit("Game mode: fullscreen window not moved")
-            return
+            return False
 
         # Get work area for normal snapping sizing
         mon = get_monitor_rect(hwnd, use_work_area=True)
         if not mon:
-            return
+            return False
         left_edge, top_edge, right_edge, bottom_edge = [int(x) for x in mon]
         monitor_width = int(right_edge - left_edge)
         monitor_height = int(bottom_edge - top_edge)
@@ -325,42 +329,34 @@ class SnapRestoreController(QtCore.QObject):
             h = visible_h + border_t + border_b
             x = left_edge + ((monitor_width - visible_w) // 2) - border_l
             y = top_edge + ((monitor_height - visible_h) // 2) - border_t
-            if (rc.right - rc.left, rc.bottom - rc.top, rc.left, rc.top) != (w, h, x, y):
-                USER32.MoveWindow(hwnd, int(x), int(y), int(w), int(h), True)
+            if (rc.right - rc.left, rc.bottom - rc.top, rc.left, rc.top) == (w, h, x, y):
+                return True  # Already at the target; nothing to do.
+            return bool(USER32.MoveWindow(hwnd, int(x), int(y), int(w), int(h), True))
         else:
             w = max(660, int(monitor_width * 0.35))
             h = max(260, int(monitor_height * 0.25))
             x = left_edge + ((monitor_width - w) // 2)
             y = top_edge + ((monitor_height - h) // 2)
-            USER32.MoveWindow(hwnd, int(x), int(y), int(w), int(h), True)
+            return bool(USER32.MoveWindow(hwnd, int(x), int(y), int(w), int(h), True))
 
-    def _restore(self, hwnd: int):
+    def _restore(self, hwnd: int) -> bool:
         from PySide6 import QtWidgets
 
         for widget in QtWidgets.QApplication.topLevelWidgets():
             if int(widget.winId()) == hwnd:
                 LOG.debug("Restore: skipping Virelo's own window hwnd=%s", hwnd)
-                return  # Skip entirely per D-05
-        orig = self._orig_sizes.pop(hwnd, None)
+                return False  # Skip entirely per D-05
+        # Peek, do not pop yet: if we cannot resolve a monitor we keep the
+        # saved geometry so a later restore can still succeed.
+        orig = self._orig_sizes.get(hwnd)
         if not orig:
-            return
-        was_maximized = orig.get("maximized", False) if isinstance(orig, dict) else False
-        rect = orig["rect"] if isinstance(orig, dict) else orig
+            return False
         mon = get_monitor_rect(hwnd)
         if not mon:
-            return
+            return False
+        was_maximized = orig.get("maximized", False) if isinstance(orig, dict) else False
+        rect = orig["rect"] if isinstance(orig, dict) else orig
         left_edge, top_edge, right_edge, bottom_edge = mon
-
-        rc = wintypes.RECT()
-        USER32.GetWindowRect(hwnd, ctypes.byref(rc))
-        win_left, win_top, win_right, win_bottom = rc.left, rc.top, rc.right, rc.bottom
-        if (
-            win_left <= left_edge
-            and win_top <= top_edge
-            and win_right >= right_edge
-            and win_bottom >= bottom_edge
-        ):
-            return
 
         if was_maximized:
             win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
@@ -371,6 +367,10 @@ class SnapRestoreController(QtCore.QObject):
             x = max(left_edge, min(left, right_edge - width))
             y = max(top_edge, min(top, bottom_edge - height))
             USER32.MoveWindow(hwnd, int(x), int(y), int(width), int(height), True)
+        # Restore succeeded: forget the saved geometry so a re-snap captures
+        # the new pre-snap position.
+        self._orig_sizes.pop(hwnd, None)
+        return True
 
 
 class SnapService:
@@ -394,8 +394,10 @@ class SnapService:
         if self._mgr is None:
             return {"ok": False, "error": "Snap manager not initialized"}
         try:
-            self._mgr.perform(False)
-            return {"ok": True, "message": "Snap test applied to the active window."}
+            acted = self._mgr.perform(False)
+            if acted:
+                return {"ok": True, "message": "Snap test applied to the active window."}
+            return {"ok": False, "error": "No window was snapped (nothing eligible in front)."}
         except Exception as e:
             LOG.exception("test_snap failed")
             return {"ok": False, "error": str(e)}

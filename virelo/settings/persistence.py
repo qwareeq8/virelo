@@ -86,6 +86,11 @@ class Settings:
         self._qs.setValue("density", self.density)
         self._qs.setValue("minimize_to_tray", self.minimize_to_tray)
         self._qs.endGroup()
+        # Flush to the backing store and surface a write failure to the caller
+        # instead of silently reporting a clean save.
+        self._qs.sync()
+        if self._qs.status() != QtCore.QSettings.Status.NoError:
+            raise OSError(f"QSettings write failed: {self._qs.status()}")
 
 
 def _safe_int(val, default, bounds=None):

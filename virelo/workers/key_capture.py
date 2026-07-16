@@ -31,8 +31,13 @@ class KeyCaptureSession:
     def run(self):
         self._result = None
         self._reason = None
-        self._done.clear()
-        self._stop.clear()
+        # Honor a stop requested before the session actually started running
+        # (for example a quit issued right after capture began). Do NOT clear
+        # the stop/done events here or that request would be lost, leaving a
+        # global keyboard hook installed after teardown.
+        if self._stop.is_set():
+            self._reason = "stopped"
+            return self._result, self._reason
         hook_id = None
         start = time.monotonic()
         try:

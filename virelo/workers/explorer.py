@@ -393,6 +393,25 @@ class ExplorerAutosizeEngine:
                 if state.pending_retry:
                     state.path_stable_since = now
 
+            # Re-arm a tab whose circuit-breaker cooldown has expired so the
+            # cooldown actually leads to one more retry instead of parking the
+            # tab forever.
+            if (
+                not state.pending_retry
+                and state.circuit_open_until > 0
+                and now >= state.circuit_open_until
+            ):
+                state.pending_retry = True
+                state.retry_attempt = 0
+                state.consecutive_failures = 0
+                state.circuit_open_until = 0.0
+                state.next_retry_at = now
+                state.path_stable_since = now
+                log.info(
+                    "ExplorerAutosizeEngine.step: circuit cooldown elapsed, re-arming hwnd=%s",
+                    hwnd,
+                )
+
             # Check if we should attempt autosize for this entry
             if not state.pending_retry:
                 continue
@@ -858,6 +877,11 @@ if QtCore is not None:
                         Exception,
                     ) as e:
                         log.debug("iter_tabs: failed to get Shell.Application windows: %s", e)
+                        # The cached proxy is likely disconnected (Explorer was
+                        # restarted). Drop it so ensure_shell_app recreates it
+                        # on the next poll instead of reusing a dead proxy.
+                        shell_state["app"] = None
+                        shell_state["retry_at"] = time.time() + 1.0
                         return out
 
                     for idx, w in enumerate(window_list):

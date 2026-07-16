@@ -108,7 +108,14 @@ class ExplorerService:
         if thread is not None:
             thread.quit()
             if not thread.wait(3000):
-                LOG.warning("Explorer autosize: thread did not stop in time")
+                # The worker is blocked in a COM call. Do NOT drop the
+                # references: clearing them would let a later start() spawn a
+                # second worker while this thread is still alive, and the
+                # parented QThread could be destroyed while running. Leave them
+                # so is_running() stays True and start() no-ops; _on_finished
+                # clears them when the thread actually exits.
+                LOG.warning("Explorer autosize: thread did not stop in time; keeping reference")
+                return
         self._worker = None
         self._thread = None
         LOG.info("Explorer autosize: worker stopped.")
