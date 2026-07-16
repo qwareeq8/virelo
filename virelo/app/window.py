@@ -254,6 +254,12 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
     def _stop_background_threads(self):
+        # Let any in-flight folder view registry task finish so it is never
+        # killed mid-write during shutdown.
+        try:
+            self._bridge.wait_for_view_task()
+        except Exception:
+            LOG.exception("Waiting for folder view task failed")
         self._stop_capture_worker()
         self._explorer_service.stop()
         self._stop_theme_sync()

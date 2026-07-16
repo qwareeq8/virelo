@@ -221,8 +221,23 @@ def _force_details_on_folder_types(winreg) -> int:
     return updated
 
 
+def _key_exists(winreg, key: str) -> bool:
+    try:
+        winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY
+        ).Close()
+        return True
+    except OSError:
+        return False
+
+
 def _backup_registry_state() -> str:
-    """Export the affected keys to .reg files. Returns the backup directory."""
+    """Export the affected keys to .reg files. Returns the backup directory.
+
+    Raises RuntimeError if a key that exists cannot be exported, so the caller
+    does not destroy view state it has no recovery backup for.
+    """
+    winreg = _open_winreg()
     base = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Virelo")
     target = os.path.join(base, backup_dir_name(datetime.now()))
     os.makedirs(target, exist_ok=True)
@@ -235,7 +250,12 @@ def _backup_registry_state() -> str:
             check=False,
         )
         if result.returncode != 0:
-            # Key may simply not exist yet; that is fine for a backup.
+            if _key_exists(winreg, key):
+                stderr = result.stderr.decode("utf-8", "replace").strip()
+                raise RuntimeError(
+                    f"Backup of existing key HKCU\\{key} failed: {stderr or 'reg.exe error'}"
+                )
+            # Key does not exist yet; nothing to back up.
             LOG.info("Backup skipped for missing key HKCU\\%s", key)
     return target
 
@@ -292,15 +312,37 @@ def _shell_token():
         kernel32.CloseHandle(process)
 
 
+def _is_elevated() -> bool:
+    try:
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
 def restart_explorer() -> bool:
     """Kill and relaunch Explorer, de-elevating the new shell if possible.
 
     Returns True if a new Explorer process was started.
+
+    Safety: when this process is elevated we must NOT relaunch Explorer with
+    our own token, or the whole desktop shell would run at high integrity.
+    If de-elevation via the shell token is unavailable, we skip the restart
+    entirely and let the caller tell the user to restart Explorer or sign
+    out, rather than spawning an elevated shell.
     """
     import ctypes
     from ctypes import wintypes
 
     token = _shell_token()
+    elevated = _is_elevated()
+    if elevated and token is None:
+        LOG.warning(
+            "Skipping Explorer restart: cannot de-elevate the new shell. "
+            "The user must restart Explorer manually."
+        )
+        return False
 
     result = subprocess.run(
         ["taskkill.exe", "/f", "/im", "explorer.exe"],
@@ -367,11 +409,13 @@ def restart_explorer() -> bool:
         kernel32.CloseHandle(token)
         if launched:
             return True
-        LOG.warning(
-            "CreateProcessWithTokenW failed (error %s); falling back to direct launch",
-            ctypes.get_last_error(),
-        )
+        LOG.warning("CreateProcessWithTokenW failed (error %s)", ctypes.get_last_error())
+        if elevated:
+            # Never relaunch Explorer with our elevated token as a fallback.
+            LOG.warning("Not relaunching Explorer to avoid an elevated shell.")
+            return False
 
+    # Only reached when not elevated (direct launch inherits normal integrity).
     try:
         subprocess.Popen([explorer], close_fds=True)
         return True

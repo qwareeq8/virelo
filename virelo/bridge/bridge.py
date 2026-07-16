@@ -147,17 +147,23 @@ class VireloBridge(QObject):
             self.dirty_changed.emit(False)
             # Apply all business logic side effects
             if self._main_window:
-                self._main_window._update_snap_enabled_state()
-                self._main_window._update_explorer_autosize_thread()
-                if hasattr(self._main_window, "_hotkey_listener"):
-                    self._main_window._hotkey_listener.update_binding(new_settings["snap_key"])
-                    self._main_window._hotkey_listener.update_restore_key(
-                        new_settings["restore_key"]
-                    )
-                    self._main_window._hotkey_listener.update_press_limit(
-                        new_settings["snap_presses"]
-                    )
-                self._main_window._apply_theme_mode(new_settings["theme"])
+                mw = self._main_window
+                mw._update_snap_enabled_state()
+                mw._update_explorer_autosize_thread()
+                if hasattr(mw, "_hotkey_listener"):
+                    mw._hotkey_listener.update_binding(new_settings["snap_key"])
+                    mw._hotkey_listener.update_restore_key(new_settings["restore_key"])
+                    mw._hotkey_listener.update_press_limit(new_settings["snap_presses"])
+                mw._apply_theme_mode(new_settings["theme"])
+                # Reset must also reconcile the out-of-QSettings side effects,
+                # or the startup shortcut and tray checkmarks drift from the
+                # restored defaults.
+                self._apply_side_effects(
+                    {
+                        "run_at_startup": new_settings["run_at_startup"],
+                        "minimize_to_tray": new_settings["minimize_to_tray"],
+                    }
+                )
             return json.dumps({"ok": True, "data": new_settings})
         except Exception as e:
             LOG.exception("reset_defaults failed")
@@ -265,7 +271,10 @@ class VireloBridge(QObject):
                 else:
                     result = explorer_views.reset_folder_views()
                 if result.get("ok"):
-                    self.views_status.emit(success_message, 5000)
+                    message = success_message
+                    if not result.get("data", {}).get("restarted", True):
+                        message += " Restart File Explorer to see the change."
+                    self.views_status.emit(message, 6000)
                 else:
                     self.views_status.emit(
                         f"Folder view update failed: {result.get('error', 'unknown error')}",
@@ -279,9 +288,18 @@ class VireloBridge(QObject):
                 # if the setting is enabled.
                 self.explorer_service_restart.emit()
 
-        self._views_thread = threading.Thread(target=work, name="VireloViewTask", daemon=True)
+        # Not a daemon: shutdown joins it so registry work is never killed
+        # mid-write (see MainWindow._stop_background_threads).
+        self._views_thread = threading.Thread(target=work, name="VireloViewTask")
         self._views_thread.start()
         return json.dumps({"ok": True, "data": {"started": True}})
+
+    def wait_for_view_task(self, timeout: float = 10.0) -> None:
+        """Block until any in-flight folder view task finishes (shutdown path)."""
+        thread = self._views_thread
+        if thread is not None and thread.is_alive():
+            LOG.info("Waiting for folder view task to finish before shutdown")
+            thread.join(timeout)
 
     # --- Window Command Slot ---
 

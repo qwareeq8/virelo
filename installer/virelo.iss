@@ -46,5 +46,8 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: no
 
 [UninstallDelete]
 ; The HKCU settings registry key is intentionally preserved so user settings survive an uninstall.
-Type: filesandordirs; Name: "{localappdata}\{#MyAppName}"
+; Remove logs only. The folder-view recovery backups under
+; {localappdata}\{#MyAppName}\view-backup-* are deliberately kept so a user
+; can undo a Details-view change after uninstalling.
+Type: files; Name: "{localappdata}\{#MyAppName}\*.log"
 Type: files; Name: "{userstartup}\{#MyAppName}.lnk"
