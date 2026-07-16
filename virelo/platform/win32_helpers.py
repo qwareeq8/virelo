@@ -10,24 +10,32 @@ import win32gui
 
 LOG = logging.getLogger("Virelo")
 
-USER32 = ctypes.windll.user32
-KERNEL32 = ctypes.windll.kernel32
+# ctypes.windll only exists on Windows. Guard the module-level access so the
+# package can be imported for unit-test collection on Linux CI, where these
+# functions are never actually called.
+try:
+    USER32 = ctypes.windll.user32
+    KERNEL32 = ctypes.windll.kernel32
+except AttributeError:  # pragma: no cover - non-Windows import path
+    USER32 = None
+    KERNEL32 = None
 
-# Explicit signatures for the calls we use with window handles. Without a
-# restype, ctypes truncates HWNDs to a signed 32-bit int, which breaks
-# equality checks against Qt's unsigned winId().
-USER32.GetForegroundWindow.restype = wintypes.HWND
-USER32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-USER32.GetWindowRect.restype = wintypes.BOOL
-USER32.MoveWindow.argtypes = [
-    wintypes.HWND,
-    ctypes.c_int,
-    ctypes.c_int,
-    ctypes.c_int,
-    ctypes.c_int,
-    wintypes.BOOL,
-]
-USER32.MoveWindow.restype = wintypes.BOOL
+if USER32 is not None:
+    # Explicit signatures for the calls we use with window handles. Without a
+    # restype, ctypes truncates HWNDs to a signed 32-bit int, which breaks
+    # equality checks against Qt's unsigned winId().
+    USER32.GetForegroundWindow.restype = wintypes.HWND
+    USER32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    USER32.GetWindowRect.restype = wintypes.BOOL
+    USER32.MoveWindow.argtypes = [
+        wintypes.HWND,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        wintypes.BOOL,
+    ]
+    USER32.MoveWindow.restype = wintypes.BOOL
 
 LVM_FIRST = 0x1000
 LVM_GETHEADER = LVM_FIRST + 31
