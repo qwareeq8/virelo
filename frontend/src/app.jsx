@@ -240,8 +240,6 @@ export default function VireloApp({ bridge }) {
       return next;
     });
   };
-  const app = { ...state, set, onTestSnap: handleTestSnap, onReset: handleReset, bridge };
-
   const handleSave = () => {
     bridge.commit_draft((result) => {
       try {
@@ -289,6 +287,8 @@ export default function VireloApp({ bridge }) {
       }
     });
   };
+
+  const app = { ...state, set, onTestSnap: handleTestSnap, onReset: handleReset, bridge };
 
   // Ctrl+K to toggle command palette
   React.useEffect(() => {
