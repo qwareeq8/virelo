@@ -23,8 +23,8 @@ Write-Host "[bootstrap] Installing Python dependencies..."
 & ".venv\Scripts\python.exe" -m pip install --upgrade pip
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
 
-& ".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements.txt failed" }
+& ".venv\Scripts\python.exe" -m pip install -e ".[dev,build]"
+if ($LASTEXITCODE -ne 0) { throw "pip install -e .[dev,build] failed" }
 
 # --- Install frontend dependencies ---
 $npm = Get-Command npm -ErrorAction SilentlyContinue
