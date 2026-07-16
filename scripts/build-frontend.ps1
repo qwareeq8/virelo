@@ -22,7 +22,16 @@ Write-Host "[build-frontend] Version: $env:VITE_APP_VERSION"
 # The try/finally keeps the location stack balanced when a step throws.
 Push-Location frontend
 try {
-    if (-not (Test-Path "node_modules")) {
+    # Reinstall when node_modules is missing or the lockfile is newer than
+    # the installed tree, so a lockfile change is never built against stale
+    # dependencies.
+    $needsInstall = -not (Test-Path "node_modules")
+    if (-not $needsInstall -and (Test-Path "package-lock.json")) {
+        $lockTime = (Get-Item "package-lock.json").LastWriteTimeUtc
+        $modTime = (Get-Item "node_modules").LastWriteTimeUtc
+        if ($lockTime -gt $modTime) { $needsInstall = $true }
+    }
+    if ($needsInstall) {
         Write-Host "[build-frontend] Installing dependencies..."
         npm ci
         if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }

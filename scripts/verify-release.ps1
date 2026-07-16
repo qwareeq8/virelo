@@ -119,6 +119,21 @@ if ($staleFiles) {
     Write-Host "[verify-release] OK: No stale naming in dist/"
 }
 
+# --- Freshness: the built exe must be newer than the newest tracked source ---
+# Guards against shipping a stale build whose version string still matches.
+$exePath = "dist\Virelo\Virelo.exe"
+if (Test-Path $exePath) {
+    $exeTime = (Get-Item $exePath).LastWriteTimeUtc
+    $newestSource = Get-ChildItem -Recurse -File -Include *.py, *.jsx, *.js, *.css `
+        -Path "virelo", "frontend\src" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    if ($newestSource -and $newestSource.LastWriteTimeUtc -gt $exeTime) {
+        $errors += "Stale build: $exePath predates $($newestSource.FullName). Rebuild before releasing."
+    } else {
+        Write-Host "[verify-release] OK: Build is newer than tracked source"
+    }
+}
+
 # --- Report ---
 if ($errors.Count -gt 0) {
     Write-Host ""
