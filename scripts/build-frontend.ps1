@@ -18,19 +18,23 @@ if (-not $versionMatch) { throw "APP_VERSION not found in virelo/app/config.py" 
 $env:VITE_APP_VERSION = $versionMatch.Matches.Groups[1].Value
 Write-Host "[build-frontend] Version: $env:VITE_APP_VERSION"
 
-# --- Install dependencies if needed ---
+# --- Install dependencies if needed, then build ---
+# The try/finally keeps the location stack balanced when a step throws.
 Push-Location frontend
-if (-not (Test-Path "node_modules")) {
-    Write-Host "[build-frontend] Installing dependencies..."
-    npm ci
-    if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
-}
+try {
+    if (-not (Test-Path "node_modules")) {
+        Write-Host "[build-frontend] Installing dependencies..."
+        npm ci
+        if ($LASTEXITCODE -ne 0) { throw "npm ci failed" }
+    }
 
-# --- Build ---
-Write-Host "[build-frontend] Building frontend..."
-npm run build
-if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
-Pop-Location
+    # --- Build ---
+    Write-Host "[build-frontend] Building frontend..."
+    npm run build
+    if ($LASTEXITCODE -ne 0) { throw "npm run build failed" }
+} finally {
+    Pop-Location
+}
 
 # --- Postcondition check ---
 if (-not (Test-Path "frontend\dist\index.html")) {

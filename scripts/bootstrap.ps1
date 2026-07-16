@@ -7,7 +7,18 @@ Set-Location $projectRoot
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) { throw "Python not found. Install from https://www.python.org" }
 
-Write-Host "[bootstrap] Python $(python --version)"
+$pythonVersionOutput = python --version
+if ($LASTEXITCODE -ne 0) { throw "python --version failed" }
+
+$pyVerMatch = [regex]::Match($pythonVersionOutput, "Python (\d+)\.(\d+)")
+if (-not $pyVerMatch.Success) { throw "Could not parse Python version from '$pythonVersionOutput'" }
+$pyMajor = [int]$pyVerMatch.Groups[1].Value
+$pyMinor = [int]$pyVerMatch.Groups[2].Value
+if ($pyMajor -lt 3 -or ($pyMajor -eq 3 -and $pyMinor -lt 12)) {
+    throw "Python 3.12 or newer is required, found $pythonVersionOutput. Install from https://www.python.org"
+}
+
+Write-Host "[bootstrap] $pythonVersionOutput"
 
 # --- Create .venv if absent ---
 if (-not (Test-Path ".venv")) {

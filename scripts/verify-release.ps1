@@ -58,18 +58,56 @@ if ($AppVersion -ne $pkgJsonVersion) {
     Write-Host "[verify-release] OK: Versions match ($AppVersion)"
 }
 
-# --- Bundled icon.ico in dist/ ---
-if (-not (Test-Path "dist\Virelo\icon.ico")) {
-    $errors += "Missing: dist\Virelo\icon.ico"
-} else {
-    Write-Host "[verify-release] OK: dist/Virelo/icon.ico"
+# --- Version cross-check (Virelo.spec regex vs config.py) ---
+# The spec file parses APP_VERSION via regex at build time. Apply the same regex here
+# so a spec that silently fails to parse the version cannot go unnoticed.
+if (Test-Path "Virelo.spec") {
+    $specRegexLine = Select-String -Path "Virelo.spec" -Pattern "re\.search\(r'([^']+)'"
+    if ($specRegexLine) {
+        $specPattern = $specRegexLine.Matches.Groups[1].Value
+        $configText = Get-Content "virelo\app\config.py" -Raw
+        $specParse = [regex]::Match($configText, $specPattern)
+        if (-not $specParse.Success) {
+            $errors += "Virelo.spec version regex does not match virelo/app/config.py"
+        } elseif ($specParse.Groups[1].Value -ne $AppVersion) {
+            $errors += "Version mismatch: config.py=$AppVersion, Virelo.spec parse=$($specParse.Groups[1].Value)"
+        } else {
+            Write-Host "[verify-release] OK: Virelo.spec regex parses version $AppVersion"
+        }
+    } else {
+        Write-Host "[verify-release] WARNING: Could not locate the version regex in Virelo.spec, skipping spec parse check"
+    }
 }
 
-# --- Bundled frontend/dist/ in dist/ ---
-if (-not (Test-Path "dist\Virelo\frontend\dist\index.html")) {
-    $errors += "Missing: dist\Virelo\frontend\dist\index.html"
+# --- Version cross-check (installed package metadata vs config.py) ---
+# The package version is dynamic in pyproject.toml and resolves from APP_VERSION.
+# This check is skipped with a warning when no venv exists.
+$venvPython = ".venv\Scripts\python.exe"
+if (Test-Path $venvPython) {
+    $installedVersion = (& $venvPython -c "import importlib.metadata; print(importlib.metadata.version('virelo'))" 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "[verify-release] WARNING: Could not read the installed virelo package version, skipping metadata check"
+    } elseif ($installedVersion -ne $AppVersion) {
+        $errors += "Version mismatch: config.py=$AppVersion, installed package=$installedVersion"
+    } else {
+        Write-Host "[verify-release] OK: Installed package version matches ($AppVersion)"
+    }
 } else {
-    Write-Host "[verify-release] OK: dist/Virelo/frontend/dist/index.html"
+    Write-Host "[verify-release] WARNING: .venv not found, skipping installed package version check"
+}
+
+# --- Bundled icon.ico in dist/ (PyInstaller 6 onedir places datas under _internal/) ---
+if (-not (Test-Path "dist\Virelo\_internal\icon.ico")) {
+    $errors += "Missing: dist\Virelo\_internal\icon.ico"
+} else {
+    Write-Host "[verify-release] OK: dist/Virelo/_internal/icon.ico"
+}
+
+# --- Bundled frontend/dist/ in dist/ (PyInstaller 6 onedir places datas under _internal/) ---
+if (-not (Test-Path "dist\Virelo\_internal\frontend\dist\index.html")) {
+    $errors += "Missing: dist\Virelo\_internal\frontend\dist\index.html"
+} else {
+    Write-Host "[verify-release] OK: dist/Virelo/_internal/frontend/dist/index.html"
 }
 
 # --- No stale naming in dist/ ---

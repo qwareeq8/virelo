@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "virelo"
-version = "1.5.0"
+dynamic = ["version"]
 description = "Windows desktop utility for window snapping and Explorer column auto-sizing"
 requires-python = ">=3.12"
 license = {text = "MIT"}
@@ -12,8 +12,8 @@ authors = [{name = "Yusuf Qwareeq"}]
 dependencies = [
     "PySide6>=6.6",
     "keyboard>=0.13.5",
-    "pywin32>=306",
-    "comtypes>=1.3.0",
+    "pywin32>=306; sys_platform == 'win32'",
+    "comtypes>=1.3.0; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +29,11 @@ build = [
 
 [tool.setuptools.packages.find]
 include = ["virelo*"]
+
+[tool.setuptools.dynamic]
+# The package version derives from APP_VERSION in virelo/app/config.py, the single source of truth.
+# That module is pure constants with no imports, so the attr lookup is safe at build time.
+version = {attr = "virelo.app.config.APP_VERSION"}
 
 [tool.ruff]
 target-version = "py312"
