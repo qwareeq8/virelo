@@ -71,7 +71,7 @@ In release mode, the frontend is built to static files (`frontend/dist/`) and lo
 
 ## Status
 
-Under active development. Current version 1.5.0.
+Under active development. The current version is defined by `APP_VERSION` in `virelo/app/config.py`.
 
 ## License
 

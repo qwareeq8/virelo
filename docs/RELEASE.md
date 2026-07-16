@@ -46,10 +46,12 @@
    - `dist/Virelo/Virelo.exe` exists
    - `installer/dist/VireloSetup.exe` exists
    - `Virelo.spec` exists
-   - No stale "Windows Toolbox" naming
+   - No stale legacy naming from before the rename
    - Version in `config.py` matches `frontend/package.json`
-   - Bundled `icon.ico` exists in `dist/Virelo/`
-   - Bundled `frontend/dist/index.html` exists in `dist/Virelo/`
+   - Version regex in `Virelo.spec` parses the same version from `config.py`
+   - Installed package version matches `config.py` (skipped with a warning if `.venv` is absent)
+   - Bundled `icon.ico` exists in `dist/Virelo/_internal/`
+   - Bundled `frontend/dist/index.html` exists in `dist/Virelo/_internal/`
    - No stale naming in `dist/` output
 
 ## Post-Build Verification
