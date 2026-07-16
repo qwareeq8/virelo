@@ -517,23 +517,36 @@ export default function VireloApp({ bridge }) {
     [sendSave],
   );
 
+  // Cancel any scheduled trailing write and drop the queued value. Save,
+  // discard, and reset must call this (or flushPendingSave) first so a stale
+  // throttled write cannot fire after the action and resurrect old state.
+  const cancelPendingSave = React.useCallback(() => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    pendingSave.current = null;
+  }, []);
+
+  // Send any queued trailing write immediately so the bridge draft reflects
+  // the latest UI state before a commit.
+  const flushPendingSave = React.useCallback(() => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const queued = pendingSave.current;
+    pendingSave.current = null;
+    if (queued) sendSave(queued);
+  }, [sendSave]);
+
   // Flush any queued draft write on unmount so no change is lost.
-  React.useEffect(
-    () => () => {
-      if (saveTimer.current) {
-        clearTimeout(saveTimer.current);
-        saveTimer.current = null;
-      }
-      if (pendingSave.current) {
-        const queued = pendingSave.current;
-        pendingSave.current = null;
-        sendSave(queued);
-      }
-    },
-    [sendSave],
-  );
+  React.useEffect(() => () => flushPendingSave(), [flushPendingSave]);
 
   const handleSave = () => {
+    // Push any queued draft write first; bridge calls are handled in order,
+    // so the commit below operates on the latest state.
+    flushPendingSave();
     bridge.commit_draft((result) => {
       try {
         const r = JSON.parse(result);
@@ -549,6 +562,9 @@ export default function VireloApp({ bridge }) {
   };
 
   const handleDiscard = () => {
+    // Drop any queued draft write so it cannot re-dirty the settings right
+    // after the discard lands.
+    cancelPendingSave();
     bridge.discard_draft((result) => {
       try {
         const r = JSON.parse(result);
@@ -564,6 +580,9 @@ export default function VireloApp({ bridge }) {
   };
 
   const handleReset = () => {
+    // Drop any queued draft write so it cannot overwrite the defaults that
+    // the reset is about to install.
+    cancelPendingSave();
     bridge.reset_defaults((json) => {
       try {
         const r = JSON.parse(json);

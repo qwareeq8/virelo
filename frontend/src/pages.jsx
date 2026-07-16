@@ -349,7 +349,12 @@ function SnapPage({ app }) {
         <MonitorPreview width={app.width} height={app.height} />
         <div style={{ padding: `4px ${t.cardPad}px` }}>
           <Row label="Width" description={`${app.width}% of screen width`}>
-            <Slider value={app.width} onChange={(v) => app.set({ width: v })} />
+            <Slider
+              value={app.width}
+              onChange={(v) => app.set({ width: v })}
+              min={10}
+              max={100}
+            />
           </Row>
           <Row
             label="Height"
@@ -359,6 +364,8 @@ function SnapPage({ app }) {
             <Slider
               value={app.height}
               onChange={(v) => app.set({ height: v })}
+              min={10}
+              max={100}
             />
           </Row>
         </div>
@@ -400,15 +407,18 @@ function ExplorerPage({ app }) {
     }
     setBusy(action);
     const onResult = (result) => {
+      // The bridge callback only acknowledges that the background task has
+      // started. The real success or failure message arrives later through
+      // the views_status signal, which app.jsx routes to the footer status.
       setBusy(null);
       try {
         const r = JSON.parse(result);
         if (r.ok) {
           app.showStatus?.(
             action === "apply"
-              ? "Details view applied."
-              : "Folder views reset.",
-            3000,
+              ? "Applying Details view. File Explorer will restart..."
+              : "Resetting folder views. File Explorer will restart...",
+            0,
           );
         } else {
           app.showStatus?.(r.error || "Folder view update failed.", 5000);
@@ -561,14 +571,21 @@ function ExplorerPage({ app }) {
 
 function ShortcutsPage({ app }) {
   const t = useTokens();
+  const taps = app.pressCount === 1 ? "once" : `${app.pressCount} times`;
+  // Restore is a modifier gesture: the restore key is HELD while the snap
+  // key is tapped the configured number of times (see snap.py, which checks
+  // keyboard.is_pressed(restore_key) when the press target is reached).
   const items = [
     {
       label: "Trigger snap",
+      description: `Tap ${app.snapKey} ${taps}.`,
       keys: Array.from({ length: app.pressCount }, () => app.snapKey),
     },
     {
       label: "Restore last snap",
-      keys: Array.from({ length: app.pressCount }, () => app.restoreKey),
+      description: `Hold ${app.restoreKey} while tapping ${app.snapKey} ${taps}.`,
+      hold: app.restoreKey,
+      keys: Array.from({ length: app.pressCount }, () => app.snapKey),
     },
     { label: "Command palette", keys: ["Ctrl", "K"] },
   ];
@@ -589,10 +606,39 @@ function ShortcutsPage({ app }) {
                 i < items.length - 1 ? `1px solid ${t.border}` : "none",
             }}
           >
-            <div style={{ flex: 1, fontSize: 13, color: t.text }}>
-              {it.label}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: t.text }}>{it.label}</div>
+              {it.description && (
+                <div style={{ fontSize: 11.5, color: t.textDim, marginTop: 2 }}>
+                  {it.description}
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
+              {it.hold && (
+                <>
+                  <Kbd>{it.hold}</Kbd>
+                  <span
+                    style={{
+                      color: t.textMuted,
+                      fontSize: 10,
+                      margin: "0 2px",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    (hold)
+                  </span>
+                  <span
+                    style={{
+                      color: t.textMuted,
+                      fontSize: 11,
+                      margin: "0 1px",
+                    }}
+                  >
+                    +
+                  </span>
+                </>
+              )}
               {it.keys.map((k, j) => (
                 <React.Fragment key={j}>
                   {j > 0 && (
