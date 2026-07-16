@@ -5,9 +5,9 @@ Win32 APIs or a running desktop.
 """
 
 import sys
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch
 
 from virelo.app.config import DEFAULTS
 from virelo.platform.win32_helpers import FULLSCREEN_TOLERANCE, _rect_matches_monitor
@@ -22,6 +22,7 @@ def _make_settings(**overrides):
     obj.save = lambda: None
     obj.clear = lambda: None
     return obj
+
 
 # -- _rect_matches_monitor --
 

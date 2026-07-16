@@ -147,8 +147,12 @@ class VireloBridge(QObject):
                 self._main_window._update_explorer_autosize_thread()
                 if hasattr(self._main_window, "_hotkey_listener"):
                     self._main_window._hotkey_listener.update_binding(new_settings["snap_key"])
-                    self._main_window._hotkey_listener.update_restore_key(new_settings["restore_key"])
-                    self._main_window._hotkey_listener.update_press_limit(new_settings["snap_presses"])
+                    self._main_window._hotkey_listener.update_restore_key(
+                        new_settings["restore_key"]
+                    )
+                    self._main_window._hotkey_listener.update_press_limit(
+                        new_settings["snap_presses"]
+                    )
                 self._main_window._apply_theme_mode(new_settings["theme"])
             return json.dumps({"ok": True, "data": new_settings})
         except Exception as e:
@@ -267,6 +271,7 @@ class VireloBridge(QObject):
         if "run_at_startup" in applied:
             try:
                 from virelo.app.window import create_startup_shortcut, remove_startup_shortcut
+
                 if applied["run_at_startup"]:
                     create_startup_shortcut()
                 else:

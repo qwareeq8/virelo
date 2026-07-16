@@ -78,9 +78,7 @@ def classify_hit(pos_x, pos_y, width, height, border=4, title_bar_height=35, con
         return result
 
     # 2. Title bar drag zone (HTCAPTION)
-    if (pos_y < title_bar_height
-            and pos_x >= border
-            and pos_x < width - controls_width):
+    if pos_y < title_bar_height and pos_x >= border and pos_x < width - controls_width:
         return HTCAPTION
 
     # 3. Fall through

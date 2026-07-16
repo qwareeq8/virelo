@@ -29,8 +29,8 @@ LOG = logging.getLogger("Virelo")
 APP_TITLE = APP_NAME
 
 # Window chrome constants for WM_NCHITTEST hit-zone classification
-TITLE_BAR_HEIGHT = 35   # Frontend TitleBar: 34px height + 1px borderBottom
-CONTROLS_WIDTH = 60     # Two 28px window control buttons + right padding margin
+TITLE_BAR_HEIGHT = 35  # Frontend TitleBar: 34px height + 1px borderBottom
+CONTROLS_WIDTH = 60  # Two 28px window control buttons + right padding margin
 
 
 # ------------------------------------------------------------------------------
@@ -495,9 +495,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     return True, result
 
                 # Title bar drag zone (D-01, D-02, D-03)
-                if (pos.y() < TITLE_BAR_HEIGHT
-                        and pos.x() >= BORDER
-                        and pos.x() < rect.width() - CONTROLS_WIDTH):
+                if (
+                    pos.y() < TITLE_BAR_HEIGHT
+                    and pos.x() >= BORDER
+                    and pos.x() < rect.width() - CONTROLS_WIDTH
+                ):
                     return True, 2  # HTCAPTION
 
         return super().nativeEvent(event_type, message)

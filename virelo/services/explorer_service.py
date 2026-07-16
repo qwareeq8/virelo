@@ -76,9 +76,7 @@ class ExplorerService:
         app = QtWidgets.QApplication.instance()
         pushed_cursor = False
         if app is not None:
-            QtGui.QGuiApplication.setOverrideCursor(
-                QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor)
-            )
+            QtGui.QGuiApplication.setOverrideCursor(QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
             pushed_cursor = True
         try:
             group_enabled = bool(self._settings.ex_auto_size)

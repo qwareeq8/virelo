@@ -182,11 +182,13 @@ def test_get_all_includes_new_keys(settings_state):
 
 def test_commit_persists_new_keys(settings_state, mock_settings):
     """After apply+commit, mock_settings must have accent/density/minimize_to_tray updated."""
-    settings_state.apply_draft({
-        "accent": "teal",
-        "density": "compact",
-        "minimize_to_tray": False,
-    })
+    settings_state.apply_draft(
+        {
+            "accent": "teal",
+            "density": "compact",
+            "minimize_to_tray": False,
+        }
+    )
     result = settings_state.commit_draft()
     assert result["ok"] is True
     assert mock_settings.accent == "teal"

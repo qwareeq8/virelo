@@ -13,7 +13,6 @@ from virelo.app.config import DEFAULTS, normalize_snap_presses
 from virelo.platform.theme import normalize_theme_mode
 from virelo.settings.persistence import Settings
 
-
 _VALID_ACCENTS = ("slate", "teal", "blue", "rust", "purple")
 _VALID_DENSITIES = ("compact", "cozy", "comfortable")
 
