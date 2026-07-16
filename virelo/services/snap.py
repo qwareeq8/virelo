@@ -96,20 +96,26 @@ class MultiPressHotkeyListener(QtCore.QObject):
         self._held = False
 
     def update_binding(self, new_key: str):
+        # Install the new hooks BEFORE removing the old ones and roll back on
+        # failure, so a malformed key name cannot leave snapping dead with no
+        # working hook installed.
         try:
-            keyboard.unhook(self._press_hook)
+            new_press = keyboard.on_press_key(new_key, self._on_press)
+            new_release = keyboard.on_release_key(new_key, self._on_release)
         except Exception:
-            pass
-        try:
-            keyboard.unhook(self._release_hook)
-        except Exception:
-            pass
+            LOG.exception("Rebinding snap key to %r failed; keeping the current binding", new_key)
+            return
+        for hook in (self._press_hook, self._release_hook):
+            try:
+                keyboard.unhook(hook)
+            except Exception:
+                pass
         # The old release hook is gone; a key physically held through the swap
         # would otherwise leave _held stuck True forever.
         self._held = False
         self.current_key = new_key
-        self._press_hook = keyboard.on_press_key(self.current_key, self._on_press)
-        self._release_hook = keyboard.on_release_key(self.current_key, self._on_release)
+        self._press_hook = new_press
+        self._release_hook = new_release
         with self._press_lock:
             self._press_times = deque(
                 self._press_times,
