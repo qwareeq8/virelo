@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: pip install ruff
+      - run: ruff check .
+      - run: ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/unit/ -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+      - run: npx vitest run
+        working-directory: frontend
+
+  stale-name:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for stale "Windows Toolbox" references
+        run: |
+          if grep -rn "Windows Toolbox" . \
+            --include="*.py" --include="*.jsx" --include="*.js" \
+            --include="*.json" --include="*.toml" --include="*.yml" \
+            --include="*.iss" --include="*.spec" \
+            --exclude-dir=node_modules --exclude-dir=.git \
+            --exclude-dir=dist --exclude-dir=build \
+            --exclude-dir=.planning --exclude-dir=.github; then
+            echo "ERROR: Found stale 'Windows Toolbox' references"
+            exit 1
+          fi
+          echo "OK: No stale references found"
+
+  version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version consistency (config.py vs package.json)
+        run: |
+          PY_VERSION=$(grep -oP '(?<=APP_VERSION = ")[^"]+' virelo/app/config.py)
+          PKG_VERSION=$(grep -oP '(?<="version": ")[^"]+' frontend/package.json)
+          echo "config.py APP_VERSION:  $PY_VERSION"
+          echo "package.json version:   $PKG_VERSION"
+          if [ "$PY_VERSION" != "$PKG_VERSION" ]; then
+            echo "ERROR: Version mismatch"
+            exit 1
+          fi
+          echo "OK: Versions match ($PY_VERSION)"
