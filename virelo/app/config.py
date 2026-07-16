@@ -33,8 +33,9 @@ DEFAULTS = {
 
 
 def normalize_snap_presses(value):
+    """Coerce to an int in [1, 10]; out-of-range counts silently disable snapping."""
     try:
         val = int(value)
     except Exception:
         return DEFAULTS["snap_presses"]
-    return max(1, val)
+    return max(1, min(10, val))

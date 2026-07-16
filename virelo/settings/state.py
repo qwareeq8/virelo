@@ -1,6 +1,6 @@
 """Settings state management for the VireloBridge.
 
-Reads all 11 settings keys from QSettings via the existing Settings class
+Reads all settings keys from QSettings via the existing Settings class
 and returns them as a JSON-serializable dict. Validates and writes settings
 back via a draft/commit model: changes accumulate in a draft dict, Save
 persists to QSettings and applies side effects, Discard reverts to persisted

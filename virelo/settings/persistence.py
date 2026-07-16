@@ -16,21 +16,28 @@ class Settings:
             self._qs.value("enable_snap", DEFAULTS["enable_snap"], bool),
             DEFAULTS["enable_snap"],
         )
+        # Bounds mirror SettingsState.KEYS: a corrupted or hand-edited registry
+        # value must not reach the geometry math (width_pct=0 would create a
+        # zero-size window; 150 would push it off-screen).
         self.snap_presses = _safe_int(
             self._qs.value("snap_presses", DEFAULTS["snap_presses"], int),
             DEFAULTS["snap_presses"],
+            bounds=(1, 10),
         )
         self.snap_interval = _safe_int(
             self._qs.value("snap_interval", DEFAULTS["snap_interval"], int),
             DEFAULTS["snap_interval"],
+            bounds=(100, 5000),
         )
         self.width_pct = _safe_int(
             self._qs.value("width_pct", DEFAULTS["width_pct"], int),
             DEFAULTS["width_pct"],
+            bounds=(10, 100),
         )
         self.height_pct = _safe_int(
             self._qs.value("height_pct", DEFAULTS["height_pct"], int),
             DEFAULTS["height_pct"],
+            bounds=(10, 100),
         )
         self.ex_auto_size = _safe_bool(
             self._qs.value("ex_auto_size", DEFAULTS["ex_auto_size"], bool),
@@ -81,13 +88,18 @@ class Settings:
         self._qs.endGroup()
 
 
-def _safe_int(val, default):
+def _safe_int(val, default, bounds=None):
+    """Coerce to int, falling back to default; clamp into bounds when given."""
     try:
         if val is None:
             return default
-        return int(val)
+        result = int(val)
     except Exception:
         return default
+    if bounds is not None:
+        lo, hi = bounds
+        result = max(lo, min(hi, result))
+    return result
 
 
 def _safe_bool(val, default):
