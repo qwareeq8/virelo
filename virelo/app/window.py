@@ -320,6 +320,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bridge.capture_status.emit("cancelled" if reason != "timeout" else "timeout")
         self._bridge.snap_status.emit(message, 2000)
 
+    def _cancel_key_capture(self):
+        """Stop an in-progress capture so the global keyboard hook is released.
+
+        Signals the worker to stop; the normal cancelled/finished path then
+        emits capture_status and releases the guard.
+        """
+        worker = getattr(self, "_capture_worker", None)
+        if worker is not None:
+            try:
+                worker.stop()
+            except Exception:
+                LOG.exception("Cancelling key capture failed")
+
     def _on_capture_finished(self):
         self._capture_guard.finish()
         self._capture_thread = None

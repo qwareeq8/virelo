@@ -206,6 +206,23 @@ class VireloBridge(QObject):
             LOG.exception("capture_key failed")
             return json.dumps({"ok": False, "error": str(e)})
 
+    @Slot(result=str)
+    def cancel_capture(self) -> str:
+        """Cancel an in-progress key capture and release the global hook.
+
+        Without this, closing the capture UI (Escape or clicking away) leaves
+        the backend hook active until timeout, so the next key pressed in any
+        application is silently captured as the new binding.
+        """
+        if self._main_window is None:
+            return json.dumps({"ok": True})
+        try:
+            self._main_window._cancel_key_capture()
+            return json.dumps({"ok": True})
+        except Exception as e:
+            LOG.exception("cancel_capture failed")
+            return json.dumps({"ok": False, "error": str(e)})
+
     # --- Theme Slots ---
 
     @Slot(result=str)

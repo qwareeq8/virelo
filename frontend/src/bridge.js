@@ -38,6 +38,7 @@ const MOCK_BRIDGE = {
   get_snap_enabled: (cb) => cb(JSON.stringify({ ok: true, data: true })),
   test_snap: (cb) => cb(JSON.stringify({ ok: true })),
   capture_key: (target, cb) => cb(JSON.stringify({ ok: true })),
+  cancel_capture: (cb) => cb(JSON.stringify({ ok: true })),
   reset_defaults: (cb) => cb(JSON.stringify({ ok: true, data: MOCK_SETTINGS })),
   get_theme_mode: (cb) =>
     cb(JSON.stringify({ ok: true, data: { mode: "dark", effective: "dark" } })),

@@ -47,6 +47,12 @@ function KeyCapture({ value, target, bridge }) {
 
   React.useEffect(() => {
     if (!capturing) return;
+    // Tell the backend to release its global keyboard hook. Without this,
+    // dismissing the capture UI leaves the hook active and the next key
+    // pressed in any application is captured as the new binding.
+    const cancelBackend = () => {
+      if (bridge.cancel_capture) bridge.cancel_capture(() => {});
+    };
     const onStatus = (status) => {
       if (status === "done" || status === "cancelled" || status === "timeout") {
         setCapturing(false);
@@ -56,13 +62,16 @@ function KeyCapture({ value, target, bridge }) {
     const onKey = (e) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        cancelBackend();
         setCapturing(false);
       }
     };
     window.addEventListener("keydown", onKey);
     const onMouseDown = (e) => {
-      if (btnRef.current && !btnRef.current.contains(e.target))
+      if (btnRef.current && !btnRef.current.contains(e.target)) {
+        cancelBackend();
         setCapturing(false);
+      }
     };
     const timer = setTimeout(() => {
       document.addEventListener("mousedown", onMouseDown);
