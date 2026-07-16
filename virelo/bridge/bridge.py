@@ -13,6 +13,7 @@ All slots return structured JSON payloads:
 
 import json
 import logging
+import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -38,6 +39,8 @@ class VireloBridge(QObject):
     snap_status = Signal(str, int)  # (message, timeout_ms)
     capture_status = Signal(str)  # "capturing", "done", "cancelled", "timeout"
     dirty_changed = Signal(bool)  # True = unsaved draft exists, False = clean
+    views_status = Signal(str, int)  # (message, timeout_ms) for folder view tasks
+    explorer_service_restart = Signal()  # Restart autosize worker after Explorer restart
 
     def __init__(
         self,
@@ -52,6 +55,7 @@ class VireloBridge(QObject):
         # These are set by MainWindow after construction
         self._main_window = None
         self._capture_guard = None
+        self._views_thread: threading.Thread | None = None
 
     def set_main_window(self, mw):
         """Set MainWindow reference for theme/capture/startup operations."""
@@ -185,10 +189,12 @@ class VireloBridge(QObject):
             return json.dumps({"ok": False, "error": "MainWindow not ready"})
         try:
             if target == "snap":
-                self._main_window._start_key_capture()
+                started = self._main_window._start_key_capture()
             else:
-                self._main_window._start_restore_key_capture()
-            self.capture_status.emit("capturing")
+                started = self._main_window._start_restore_key_capture()
+            # MainWindow emits capture_status("capturing") itself on success.
+            if not started:
+                return json.dumps({"ok": False, "error": "Key capture already in progress"})
             return json.dumps({"ok": True})
         except Exception as e:
             LOG.exception("capture_key failed")
@@ -221,6 +227,61 @@ class VireloBridge(QObject):
             val = bool(getattr(self._main_window, "snap_enabled", False))
             return json.dumps({"ok": True, "data": val})
         return json.dumps({"ok": True, "data": False})
+
+    # --- Explorer Default View Slots ---
+
+    @Slot(result=str)
+    def apply_details_view(self) -> str:
+        """Make Details the default view for all folders. Restarts Explorer."""
+        return self._start_view_task("apply", "Details is now the default view for all folders.")
+
+    @Slot(result=str)
+    def reset_folder_views(self) -> str:
+        """Reset all folder views to Windows defaults. Restarts Explorer."""
+        return self._start_view_task("reset", "Folder views were reset to Windows defaults.")
+
+    def _start_view_task(self, kind: str, success_message: str) -> str:
+        """Run a folder view registry task on a background thread.
+
+        The work kills and relaunches Explorer, which takes seconds; it must
+        not run on the GUI thread. Completion is reported via views_status.
+        """
+        if self._views_thread is not None and self._views_thread.is_alive():
+            return json.dumps({"ok": False, "error": "A folder view task is already running"})
+
+        # Stop the autosize worker so it does not fight the Explorer restart.
+        if self._main_window is not None:
+            try:
+                self._main_window._explorer_service.stop()
+            except Exception:
+                LOG.exception("Stopping explorer service before view task failed")
+
+        from virelo.services import explorer_views
+
+        def work():
+            try:
+                if kind == "apply":
+                    result = explorer_views.apply_details_default()
+                else:
+                    result = explorer_views.reset_folder_views()
+                if result.get("ok"):
+                    self.views_status.emit(success_message, 5000)
+                else:
+                    self.views_status.emit(
+                        f"Folder view update failed: {result.get('error', 'unknown error')}",
+                        8000,
+                    )
+            except Exception as e:
+                LOG.exception("Folder view task failed")
+                self.views_status.emit(f"Folder view update failed: {e}", 8000)
+            finally:
+                # Queued back to the GUI thread; restarts the autosize worker
+                # if the setting is enabled.
+                self.explorer_service_restart.emit()
+
+        self._views_thread = threading.Thread(target=work, name="VireloViewTask", daemon=True)
+        self._views_thread.start()
+        return json.dumps({"ok": True, "data": {"started": True}})
 
     # --- Window Command Slot ---
 

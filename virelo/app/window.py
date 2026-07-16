@@ -1,6 +1,7 @@
 """MainWindow: frameless, tray-integrated window hosting the React frontend."""
 
 import ctypes
+import ctypes.wintypes
 import logging
 import os
 import sys
@@ -134,9 +135,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._theme_mode = self.settings.theme
         self._theme_state = self.settings.theme
 
-        self._theme_timer = QtCore.QTimer(self)
-        self._theme_timer.setInterval(2000)
-        self._theme_timer.timeout.connect(self._sync_system_theme)
+        # React to OS theme changes instead of polling the registry. Qt tracks
+        # the Windows "apps use light theme" setting and emits on change.
+        QtGui.QGuiApplication.styleHints().colorSchemeChanged.connect(self._sync_system_theme)
 
         self.setWindowTitle(APP_TITLE)
         icon_path = resource_path("icon.ico")
@@ -192,6 +193,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # Route snap_key_status signal to bridge
         self.snap_key_status.connect(self._bridge.snap_status.emit)
+
+        # Folder view tasks restart Explorer; bring the autosize worker back
+        # afterward (queued from the task's worker thread to the GUI thread).
+        self._bridge.explorer_service_restart.connect(self._update_explorer_autosize_thread)
 
         # Shortcuts
         QtGui.QShortcut(QtGui.QKeySequence("Ctrl+T"), self, activated=self._toggle_theme)
@@ -257,22 +262,32 @@ class MainWindow(QtWidgets.QMainWindow):
     # Key capture (preserved -- uses bridge signals for status updates)
     # ------------------------------------------------------------------
 
-    def _start_key_capture(self):
-        self._begin_key_capture("snap", "Press desired snap key... (Esc to cancel)")
+    def _start_key_capture(self) -> bool:
+        return self._begin_key_capture("snap", "Press desired snap key... (Esc to cancel)")
 
-    def _start_restore_key_capture(self):
-        self._begin_key_capture("restore", "Press desired restore key... (Esc to cancel)")
+    def _start_restore_key_capture(self) -> bool:
+        return self._begin_key_capture("restore", "Press desired restore key... (Esc to cancel)")
 
-    def _begin_key_capture(self, target: str, message: str):
+    def _begin_key_capture(self, target: str, message: str) -> bool:
+        """Start a key capture session. Returns True when capture began."""
         if not self._capture_guard.try_start():
             self._bridge.snap_status.emit("Key capture already in progress.", 2000)
-            return
-        self._capture_target = target
+            return False
+        try:
+            self._capture_target = target
+            self._capture_thread = QtCore.QThread(self)
+            self._capture_worker = KeyCaptureWorker()
+        except Exception:
+            # Construction failed; release the guard or capture is dead forever.
+            self._capture_guard.finish()
+            self._capture_target = None
+            self._capture_thread = None
+            self._capture_worker = None
+            LOG.exception("Key capture worker construction failed")
+            self._bridge.snap_status.emit("Key capture could not start.", 3000)
+            return False
         self._bridge.snap_status.emit(message, 0)
         self._bridge.capture_status.emit("capturing")
-
-        self._capture_thread = QtCore.QThread(self)
-        self._capture_worker = KeyCaptureWorker()
         self._capture_worker.moveToThread(self._capture_thread)
         self._capture_thread.started.connect(self._capture_worker.run)
         self._capture_worker.captured.connect(self._on_capture_key)
@@ -282,6 +297,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._capture_thread.finished.connect(self._capture_thread.deleteLater)
         self._capture_thread.finished.connect(self._on_capture_finished)
         self._capture_thread.start()
+        return True
 
     def _on_capture_key(self, key: str):
         key_str = str(key).lower()
@@ -382,9 +398,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_explorer_enabled_state()
         if self.is_first_show:
             self.is_first_show = False
-            self.repaint()
-            QtWidgets.QApplication.processEvents()
-            self.center_on_screen()
+            # Defer centering to the next event-loop turn instead of forcing a
+            # reentrant processEvents() inside the show handler.
+            QtCore.QTimer.singleShot(0, self.center_on_screen)
 
     def _toggle_minimize_on_exit(self):
         checked = self.action_minimize_on_exit.isChecked()
@@ -427,13 +443,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.set_theme(self._theme_mode)
 
     def _start_theme_sync(self):
-        if not self._theme_timer.isActive():
-            self._theme_timer.start()
         self._sync_system_theme()
 
     def _stop_theme_sync(self):
-        if self._theme_timer.isActive():
-            self._theme_timer.stop()
+        pass  # Theme changes arrive via colorSchemeChanged; nothing to stop.
 
     def _sync_system_theme(self):
         if self._theme_mode != "system":
