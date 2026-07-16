@@ -19,7 +19,10 @@ def _init_logger() -> logging.Logger:
 
     log_path = os.path.join(log_dir, LOG_FILE)
     logger = logging.getLogger(APP_NAME)
-    logger.setLevel(logging.DEBUG)  # Enable DEBUG level by default for troubleshooting
+    # INFO by default; set VIRELO_DEBUG=1 for verbose logging. A resident tray
+    # app at DEBUG writes to disk continuously, so DEBUG is opt-in.
+    level = logging.DEBUG if os.environ.get("VIRELO_DEBUG") else logging.INFO
+    logger.setLevel(level)
     logger.propagate = False
 
     existing_handler = None
@@ -38,7 +41,7 @@ def _init_logger() -> logging.Logger:
             encoding="utf-8",
         )
         handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-        handler.setLevel(logging.DEBUG)  # File handler captures all levels
+        handler.setLevel(level)
         logger.addHandler(handler)
         existing_handler = handler
 
@@ -64,6 +67,32 @@ def _is_admin() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def _instance_already_running() -> bool:
+    """Return True when another Virelo instance holds the singleton mutex.
+
+    Uses OpenMutexW so it works before elevation and never creates the mutex;
+    the authoritative CreateMutex happens later in the elevated process.
+    """
+    SYNCHRONIZE = 0x00100000
+    handle = ctypes.windll.kernel32.OpenMutexW(SYNCHRONIZE, False, f"Global\\{APP_NAME}_Mutex")
+    if handle:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
+    return False
+
+
+def _focus_running_instance() -> None:
+    """Best-effort: bring the already-running instance's window to front."""
+    try:
+        hwnd = ctypes.windll.user32.FindWindowW(None, APP_NAME)
+        if hwnd:
+            SW_SHOW = 5
+            ctypes.windll.user32.ShowWindow(hwnd, SW_SHOW)
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
 
 
 def _run_smoke_test():
@@ -205,17 +234,39 @@ def main():
 
     atexit.register(_cleanup_faulthandler)
 
+    # Detect an already-running instance BEFORE elevating so a second launch
+    # does not show a pointless UAC prompt and then exit silently.
+    if _instance_already_running():
+        _focus_running_instance()
+        LOG.info("Virelo is already running; focusing the existing window.")
+        try:
+            MB_ICONINFORMATION = 0x40
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "Virelo is already running. Check the system tray.",
+                APP_NAME,
+                MB_ICONINFORMATION,
+            )
+        except Exception:
+            pass
+        return
+
     if not _is_admin():
-        script = os.path.abspath(sys.argv[0])
         params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
-        exe = sys.executable
-        if exe.lower().endswith("python.exe"):
-            candidate = exe.replace("python.exe", "pythonw.exe")
-            if os.path.exists(candidate):
-                exe = candidate
-        hinst = ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", exe, f'"{script}" {params}', None, 1
-        )
+        if getattr(sys, "frozen", False):
+            # Frozen build: the exe IS the app; passing the script path again
+            # would inject a bogus argv[1] into the elevated child.
+            exe = sys.executable
+            arguments = params
+        else:
+            script = os.path.abspath(sys.argv[0])
+            exe = sys.executable
+            if exe.lower().endswith("python.exe"):
+                candidate = exe.replace("python.exe", "pythonw.exe")
+                if os.path.exists(candidate):
+                    exe = candidate
+            arguments = f'"{script}" {params}'
+        hinst = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, arguments, None, 1)
         if int(hinst) <= 32:
             sys.stderr.write("Elevation failed.\n")
             LOG.error("Elevation failed. ShellExecuteW returned %s.", hinst)
@@ -252,8 +303,19 @@ def main():
         return
     win = MainWindow()
 
-    app.aboutToQuit.connect(lambda: (win._stop_background_threads(), win.shift_mgr.cleanup()))
-    atexit.register(lambda: (win._stop_background_threads(), win.shift_mgr.cleanup()))
+    def _shutdown():
+        """Idempotent teardown: stop workers and unhook the global hotkeys."""
+        try:
+            win._stop_background_threads()
+        except Exception:
+            LOG.exception("Background thread teardown failed")
+        try:
+            win._hotkey_listener.cleanup()
+        except Exception:
+            LOG.exception("Hotkey listener cleanup failed")
+
+    app.aboutToQuit.connect(_shutdown)
+    atexit.register(_shutdown)
 
     win._singleton_mutex = mutex
     win.show()
