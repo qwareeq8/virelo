@@ -115,20 +115,135 @@ jobs:
           fi
           echo "OK: pyproject.toml version is dynamic."
 
+  windows-arm64-capability:
+    name: Windows ARM64 Qt WebEngine capability boundary
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    outputs:
+      package-matrix: ${{ steps.probe.outputs.package-matrix }}
+      capability-status: ${{ steps.probe.outputs.capability-status }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+          architecture: arm64
+      - name: Probe the official native ARM64 Qt WebEngine capability
+        id: probe
+        shell: pwsh
+        run: |
+          $reportDirectory = Join-Path $PWD "build\arm64-capability"
+          New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+
+          $basePython = (Get-Command python).Source
+          & $basePython -I scripts\verify_python_environment.py `
+            --architecture arm64 `
+            --mode base `
+            --report "$reportDirectory\base-python.json"
+          if ($LASTEXITCODE -ne 0) {
+            throw "The capability probe is not running under verified official native ARM64 Python."
+          }
+
+          $venvPath = Join-Path $env:RUNNER_TEMP "virelo-arm64-capability"
+          & $basePython -I -m venv $venvPath
+          if ($LASTEXITCODE -ne 0) { throw "Creating the ephemeral ARM64 capability environment failed." }
+          $probePython = Join-Path $venvPath "Scripts\python.exe"
+          & $probePython -I -m pip install `
+            --disable-pip-version-check `
+            --only-binary=:all: `
+            --constraint requirements\build-constraints.txt `
+            --report "$reportDirectory\pip-install-report.json" `
+            PySide6
+          if ($LASTEXITCODE -ne 0) { throw "Installing the constrained official ARM64 PySide6 wheels failed." }
+          & $probePython -I -m pip check
+          if ($LASTEXITCODE -ne 0) { throw "The ARM64 PySide6 capability environment is inconsistent." }
+
+          $pipReport = Get-Content -LiteralPath "$reportDirectory\pip-install-report.json" -Raw |
+            ConvertFrom-Json
+          $addonsInstall = @(
+            $pipReport.install | Where-Object {
+              ($_.metadata.name -replace '[-_.]', '') -eq "PySide6Addons"
+            }
+          )
+          if ($addonsInstall.Count -ne 1) {
+            throw "The pip report does not identify exactly one PySide6-Addons wheel."
+          }
+          # Change this digest only after reviewing the replacement ARM64 wheel
+          # inventory and updating the probe's reviewed capability contract.
+          $expectedAddonsSha256 = "3494f480dee92f415be2f2d989c0b3f4755ac332b28045cbf4ba0f5c5a22ba37"
+          $actualAddonsSha256 = $addonsInstall[0].download_info.archive_info.hashes.sha256
+          if ($actualAddonsSha256 -ne $expectedAddonsSha256) {
+            throw "The reviewed ARM64 PySide6-Addons wheel hash is $actualAddonsSha256; expected $expectedAddonsSha256."
+          }
+
+          $capabilityReport = Join-Path $reportDirectory "qtwebengine.json"
+          $savedNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+          try {
+            # Exit 2 is a reviewed capability result, not an execution failure.
+            $PSNativeCommandUseErrorActionPreference = $false
+            & $probePython -I scripts\probe_qt_webengine_capability.py `
+              --architecture arm64 `
+              --report $capabilityReport
+            $probeExitCode = $LASTEXITCODE
+          }
+          finally {
+            $PSNativeCommandUseErrorActionPreference = $savedNativeErrorPreference
+          }
+          # Exit code 2 is an expected capability result, so prevent the runner's
+          # native-command epilogue from converting the reviewed result to failure.
+          $global:LASTEXITCODE = 0
+          if (-not (Test-Path -LiteralPath $capabilityReport -PathType Leaf)) {
+            throw "The ARM64 Qt WebEngine capability probe did not write its evidence report."
+          }
+          $capability = Get-Content -LiteralPath $capabilityReport -Raw | ConvertFrom-Json
+          if ($capability.schemaVersion -ne 1 -or $capability.requestedArchitecture -ne "arm64") {
+            throw "The ARM64 Qt WebEngine capability report has an unexpected schema or target."
+          }
+
+          $include = @(
+            [ordered]@{
+              architecture = "x64"
+              "python-architecture" = "x64"
+              runner = "windows-2025"
+            }
+          )
+          if ($probeExitCode -eq 0 -and $capability.status -eq "available" -and $capability.available) {
+            $include += [ordered]@{
+              architecture = "arm64"
+              "python-architecture" = "arm64"
+              runner = "windows-11-arm"
+            }
+            Write-Output "::notice title=Native ARM64 packaging enabled::The official PySide6 wheels provide the complete Qt WebEngine capability."
+          }
+          elseif ($probeExitCode -eq 2 -and $capability.status -eq "unavailable" -and -not $capability.available) {
+            Write-Output "::notice title=Native ARM64 capability boundary::The reviewed official PySide6 ARM64 wheels omit Qt WebEngine; only the x64 release payload will be built."
+          }
+          else {
+            throw "The ARM64 Qt WebEngine capability is indeterminate or contradicts probe exit code $probeExitCode."
+          }
+
+          $matrix = [ordered]@{ include = $include }
+          $matrixJson = ConvertTo-Json -InputObject $matrix -Compress -Depth 4
+          "package-matrix=$matrixJson" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "capability-status=$($capability.status)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "Native ARM64 Qt WebEngine capability: ``$($capability.status)``." |
+            Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+      - name: Upload the native ARM64 capability evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: virelo-windows-arm64-capability
+          if-no-files-found: warn
+          path: build/arm64-capability/*.json
+
   windows-package:
     name: Windows ${{ matrix.architecture }} package
+    needs: windows-arm64-capability
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - architecture: x64
-            python-architecture: x64
-            runner: windows-2025
-          - architecture: arm64
-            python-architecture: arm64
-            runner: windows-11-arm
+      matrix: ${{ fromJSON(needs.windows-arm64-capability.outputs.package-matrix) }}
     env:
       VIRELO_TARGET_ARCHITECTURE: ${{ matrix.architecture }}
     steps:
@@ -383,6 +498,7 @@ jobs:
   x64-on-arm:
     name: Windows ARM64 x64-emulation acceptance
     needs: windows-package
+    if: ${{ !cancelled() && needs.windows-package.result != 'skipped' }}
     runs-on: windows-11-arm
     timeout-minutes: 30
     steps:

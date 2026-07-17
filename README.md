@@ -17,8 +17,10 @@ Virelo provides two core features:
 
 ## Requirements
 
-- **Windows 10 version 1809 or later on x64, or Windows 11 ARM64:** Native ARM64 and x64 builds
-  are separate. The x64 build also runs through Windows 11 ARM64 x64 emulation.
+- **Windows 10 version 1809 or later on x64, or Windows 11 ARM64 with x64 application
+  emulation:** Virelo currently ships a verified x64 payload. Native ARM64 packaging is blocked
+  because the published Windows ARM64 PySide6 wheels omit the Qt WebEngine components Virelo
+  requires.
 - **Administrator privileges:** The application auto-elevates at launch through a UAC prompt.
   Administrator access is required for global keyboard hooks and cross-process window
   manipulation.
@@ -29,8 +31,8 @@ Virelo provides two core features:
 
 ### Prerequisites
 
-- Official CPython 3.12 or newer that matches the payload architecture.
-- Node.js 24 LTS that matches the payload architecture.
+- Official x64 CPython 3.12 or newer.
+- x64 Node.js 24 LTS.
 - Inno Setup 6.7.3, which is needed only for the installer.
 
 Do not use a Conda or Miniforge interpreter for a release build. A virtual environment retains
@@ -49,30 +51,26 @@ $node = "C:\Path\To\Official-x64-Node\node.exe"
 The bundle is written to `dist/x64/Virelo/`, and the installer is written to
 `installer/dist/VireloSetup-<version>-x64.exe`.
 
-### Native ARM64 Build
+### Native ARM64 Status
 
-Run this on Windows 11 ARM64 with a native ARM64 official CPython interpreter:
+Virelo does not currently produce a native ARM64 bundle or installer. The published Windows ARM64
+PySide6 and PySide6-Addons wheels omit `QtWebEngineCore`, `QtWebEngineWidgets`,
+`QtWebEngineProcess.exe`, and the WebEngine resources required by Virelo's embedded frontend. Use
+the verified x64 installer on Windows 11 ARM64 through x64 emulation.
 
-```powershell
-$python = "C:\Path\To\Official-ARM64-Python\python.exe"
-$node = "C:\Path\To\Official-ARM64-Node\node.exe"
-.\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
-.\scripts\build-installer.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
-.\scripts\verify-release.ps1 -Architecture arm64
-```
+The `arm64` build-script option remains available only as a fail-closed future capability check.
+It must not yield a release until the native imports, Qt deployment audit, PE scan, and frozen
+WebEngine smoke test all pass with upstream ARM64 packages. PyInstaller does not cross-compile
+Windows payloads, and an x64 artifact must never be renamed as ARM64.
 
-The bundle is written to `dist/arm64/Virelo/`, and the installer is written to
-`installer/dist/VireloSetup-<version>-arm64.exe`. PyInstaller does not cross-compile Windows
-payloads. The active Python process and native wheels determine the output architecture.
+The x64 release scripts validate their environment and fail when Python, native wheels, or packaged
+PE binaries do not match the requested architecture. See [Building from Source](docs/BUILD.md) for
+the full preflight, smoke-test, and PE-verification commands.
 
-Each release script validates its environment and fails when the requested architecture does
-not match Python or the packaged PE binaries. See [Building from Source](docs/BUILD.md) for the
-full preflight, smoke-test, and PE-verification commands.
-
-The supported distributable is the verified PyInstaller bundle or Inno Setup installer. The
-bootstrap uses an editable Python installation for source development; an ordinary non-editable
-wheel is not an end-user Virelo distribution because the generated React frontend is assembled by
-the Windows release pipeline.
+The supported distributables are the verified x64 PyInstaller bundle and x64 Inno Setup installer.
+The bootstrap uses an editable Python installation for source development; an ordinary
+non-editable wheel is not an end-user Virelo distribution because the generated React frontend is
+assembled by the Windows release pipeline.
 
 ## Development Mode
 

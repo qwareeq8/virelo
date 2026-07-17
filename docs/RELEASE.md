@@ -9,12 +9,13 @@ release, or remote change.
 | --- | --- | --- | --- | --- |
 | x64 | x64 Windows 11 | x64 | x64 | Build, install, smoke test, and launch |
 | x64 fallback | ARM64 Windows 11 | x64 emulation | x64 | Installer is allowed and application launches |
-| ARM64 native | ARM64 Windows 11 | ARM64 | ARM64 | Build, install, smoke test, and launch |
+| ARM64 native | ARM64 Windows 11 | ARM64 | None | Blocked until upstream PySide6 ARM64 wheels include Qt WebEngine |
 
-GitHub Actions builds, installs, smoke-tests, and uninstalls the x64 and native
-`windows-11-arm` packages, then separately installs the x64 package under ARM64 emulation.
-Physical Surface testing remains required for the
-interactive Windows features listed below.
+GitHub Actions builds, installs, smoke-tests, and uninstalls the x64 package, then separately
+installs that exact package on `windows-11-arm` under x64 emulation. A native ARM64 job may check
+future upstream capability, but it must not publish a release artifact while Qt WebEngine is
+absent. Physical Surface testing remains required for the interactive Windows features listed
+below.
 
 ## Preflight
 
@@ -37,12 +38,9 @@ interactive Windows features listed below.
    & $node -p "JSON.stringify({execPath: process.execPath, arch: process.arch, version: process.version})"
    ```
 
-   Use `.venv-arm64\Scripts\python.exe` and the native ARM64 Node executable when preparing the
-   native ARM64 target.
-
-4. If the version or Python packaging metadata changed, rerun `.\scripts\bootstrap.ps1` for the
-   target architecture before building. Confirm the editable distribution metadata and frontend
-   versions match `APP_VERSION`:
+4. If the version or Python packaging metadata changed, rerun `.\scripts\bootstrap.ps1` for x64
+   before building. Confirm the editable distribution metadata and frontend versions match
+   `APP_VERSION`:
 
    ```powershell
    .venv-x64\Scripts\python.exe -c "import importlib.metadata; print(importlib.metadata.version('virelo'))"
@@ -50,7 +48,6 @@ interactive Windows features listed below.
    Get-Content frontend\package.json | ConvertFrom-Json | Select-Object -ExpandProperty version
    ```
 
-   Use `.venv-arm64` for a native ARM64 release.
 5. Retain the exact dependency inventory written by bootstrap. The constraints control third-party
    Python package selection, but the selected CPython patch release and its bundled pip are also
    part of the recorded build environment; the process is auditable, not bit-for-bit hermetic.
@@ -60,7 +57,6 @@ interactive Windows features listed below.
    Get-Content build\x64\pip-freeze.txt
    ```
 
-   Use the ARM64 paths for a native ARM64 release.
 6. Run the full frontend audit and the production-only audit. Classify any finding before release:
 
    ```powershell
@@ -89,29 +85,23 @@ Expected outputs:
 - `build/x64/Virelo/xref-Virelo.html`
 - `installer/dist/VireloSetup-<version>-x64.exe`
 
-## Build Native ARM64
+## Native ARM64 Release Status
 
-Run only in native ARM64 PowerShell on Windows 11 ARM64:
+Do not create or publish a native ARM64 release from the current dependency set. Published Windows
+ARM64 PySide6 wheels omit the Qt WebEngine bindings, helper process, and resources required by
+Virelo. The supported Windows-on-ARM release path is the verified x64 installer running through
+x64 emulation.
 
-```powershell
-$python = "C:\Path\To\Official-ARM64-Python\python.exe"
-$node = "C:\Path\To\Official-ARM64-Node\node.exe"
-.\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
-.\scripts\build-installer.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
-.\scripts\verify-release.ps1 -Architecture arm64
-```
-
-Expected outputs:
-
-- `dist/arm64/Virelo/Virelo.exe`
-- `build/arm64/Virelo/warn-Virelo.txt`
-- `build/arm64/Virelo/xref-Virelo.html`
-- `installer/dist/VireloSetup-<version>-arm64.exe`
+A future capability check may use official ARM64 Python and Node processes, but it must stop at the
+first missing import or runtime component. Native release work can resume only after the isolated
+imports, PyInstaller hook, Qt deployment audit, recursive PE scan, source smoke test, frozen smoke
+test, installer gate, and physical Surface checklist all pass. Never rename an x64 artifact as
+ARM64.
 
 ## Required Automated Evidence
 
-For each target, retain the architecture, dependency, smoke, and PyInstaller reports produced
-under `build/<architecture>/`. Confirm all of the following:
+For the x64 target, retain the architecture, dependency, smoke, and PyInstaller reports produced
+under `build/x64/`. Confirm all of the following:
 
 - The isolated PySide6 and pywin32/comtypes import preflights pass.
 - `python-constraints.json` proves that every installed third-party package has an exact matching
@@ -138,15 +128,13 @@ search-path resolutions as actionable.
 
 ## Physical Surface Checklist
 
-Run both the native ARM64 installer and, separately, the x64 installer on a current Windows 11
-ARM64 Surface. Do not install one over an unverified running copy of the other.
+Run the verified x64 installer on a current Windows 11 ARM64 Surface through x64 emulation.
 
-- Launch the installer. Confirm the ARM64 installer is accepted only on ARM64 Windows and the x64
-  installer is accepted through x64 emulation.
+- Launch the installer and confirm the x64 payload is accepted through x64 emulation.
 - Launch Virelo and confirm the expected UAC prompt occurs once per launch, without an elevation
   loop during `--smoke-test`.
-- In Task Manager, add the **Architecture** column and confirm the native installation reports
-  `ARM64`, while the fallback installation reports `x64`.
+- In Task Manager, add the **Architecture** column and confirm Virelo reports `x64`. This is the
+  expected architecture for the supported Windows-on-ARM release.
 - Confirm the main window, system tray icon, tray menu, minimize behavior, and exit behavior.
 - Capture and use the configured global hotkey.
 - Snap and restore ordinary resizable windows.
@@ -169,8 +157,7 @@ ARM64 Surface. Do not install one over an unverified running copy of the other.
   Explorer recovery backups remain available as intended. Also test over-the-shoulder elevation,
   if available, and record that Inno Setup cannot execute uninstall cleanup as the original user;
   the original profile's startup link then requires manual removal.
-- Reinstall the opposite architecture and repeat the smoke test to detect stale mixed-architecture
-  files.
+- Reinstall the x64 package and repeat the smoke test to detect stale or partially removed files.
 
 Record the Windows build number, Surface model, display topology and scaling, installer SHA-256,
 test time, Task Manager architecture result, and pass/fail result for every checklist item.

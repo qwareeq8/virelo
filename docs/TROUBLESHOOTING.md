@@ -4,34 +4,38 @@
 
 ### An ARM64 computer produced an x64 application
 
-**Cause:** The active Python process was x64 and ran through Windows 11 ARM64 emulation. pip then
-selected `win_amd64` wheels, and PyInstaller used its Intel bootloader. The host processor does not
-change the architecture of a process or its dependencies.
+**Cause:** The active Python process was x64 and ran through Windows 11 ARM64 emulation. pip
+selected `win_amd64` wheels, and PyInstaller used its Intel bootloader. This is the expected
+architecture for Virelo's currently supported Windows-on-ARM release.
 
-**Fix:** Select an official ARM64 CPython executable and rebuild a new `.venv-arm64` environment:
+**Fix:** Use official x64 CPython and x64 Node.js, and build the explicitly named x64 target:
 
 ```powershell
-$python = "C:\Path\To\Official-ARM64-Python\python.exe"
-$node = "C:\Path\To\Official-ARM64-Node\node.exe"
+$python = "C:\Path\To\Official-x64-Python\python.exe"
+$node = "C:\Path\To\Official-x64-Node\node.exe"
 & $python -c "import platform, struct, sys; print(sys.executable); print(platform.machine()); print(struct.calcsize('P') * 8)"
-.\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\bootstrap.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
 ```
 
-Do not set `target_arch="arm64"` in `Virelo.spec`. PyInstaller is not a Windows cross-compiler.
+Selecting ARM64 Python does not currently make Virelo releasable because the published ARM64
+PySide6 wheels omit Qt WebEngine. Do not set `target_arch="arm64"` in `Virelo.spec`; PyInstaller is
+not a Windows cross-compiler.
 
 ### An existing environment is incompatible
 
-**Cause:** `.venv-x64` or `.venv-arm64` was created by a different distribution, executable, or
-process architecture.
+**Cause:** `.venv-x64` was created by a different distribution, executable, or process
+architecture. A `.venv-arm64` environment may also be rejected during a future upstream
+capability check.
 
 **Fix:** Follow the remediation path printed by the bootstrap script. Check the path before
 removing it:
 
 ```powershell
-Resolve-Path .venv-arm64
-Remove-Item -LiteralPath .venv-arm64 -Recurse -Force
-$node = "C:\Path\To\Official-ARM64-Node\node.exe"
-.\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable "C:\Path\To\Official-ARM64-Python\python.exe" -NodeExecutable $node
+Resolve-Path .venv-x64
+Remove-Item -LiteralPath .venv-x64 -Recurse -Force
+$python = "C:\Path\To\Official-x64-Python\python.exe"
+$node = "C:\Path\To\Official-x64-Node\node.exe"
+.\scripts\bootstrap.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
 ```
 
 Changing the name of a virtual environment does not change its architecture.
@@ -71,12 +75,25 @@ PySide6 wheels on ARM64 Windows.
 constrained dependencies, and run both isolated import probes before PyInstaller:
 
 ```powershell
-$python = ".venv-arm64\Scripts\python.exe"
+$python = ".venv-x64\Scripts\python.exe"
 & $python -I -c "from PySide6 import QtCore, QtWidgets, QtWebEngineCore, QtWebEngineWidgets; print(QtCore.qVersion())"
 & $python -I -c "import win32api, win32gui, win32event, pythoncom, pywintypes, comtypes"
 ```
 
 Do not download individual DLLs from third-party sites.
+
+### Native ARM64 cannot import `QtWebEngineCore`
+
+**Cause:** The published Windows ARM64 PySide6 and PySide6-Addons wheels omit the
+`QtWebEngineCore`, `QtWebEngineWidgets`, and `QtWebEngineQuick` Python extensions, their Qt DLLs,
+`QtWebEngineProcess.exe`, and the WebEngine resource and locale packs. General Qt support for
+Windows ARM64 does not imply that this optional Chromium-based module is present in PySide6's
+ARM64 wheels.
+
+**Fix:** Use the verified x64 payload on Windows 11 ARM64 through x64 emulation. No currently
+published PySide6 version supplies the missing native components. Do not copy x64 Qt binaries into
+an ARM64 environment or weaken the import preflight. A future native capability check must pass the
+imports, deployment audit, PE scan, and frozen smoke test before an ARM64 release is enabled.
 
 ### PyInstaller reports `QtLibraryInfo(PySide6): failed to obtain Qt library info`
 
@@ -88,13 +105,16 @@ build. The release scripts scan PyInstaller output and reject this hook failure.
 
 ### `qwindows.dll` or Qt WebEngine data is missing
 
-**Cause:** The PySide6 hook did not complete, the wrong environment invoked PyInstaller, or a
-partially generated `dist` tree was mistaken for a completed build.
+**Cause:** For an x64 build, the PySide6 hook did not complete, the wrong environment invoked
+PyInstaller, or a partially generated `dist` tree was mistaken for a completed build. For a native
+ARM64 capability check, the current upstream wheels omit Qt WebEngine, so no complete tree can be
+produced.
 
-**Fix:** Rebuild from the constrained environment and run `.\scripts\verify-release.ps1` for the
-target architecture. Verification requires the Windows platform plugin,
+**Fix:** Rebuild the x64 payload from the constrained environment and run
+`.\scripts\verify-release.ps1 -Architecture x64`. Verification requires the Windows platform plugin,
 `QtWebEngineProcess.exe`, WebEngine resources, locale data, Qt DLLs, and PySide/Shiboken extension
-modules. Use PyInstaller's official PySide6 hooks instead of manually enumerating the Qt tree.
+modules. Use PyInstaller's official PySide6 hooks instead of manually enumerating the Qt tree. For
+ARM64, stop at the failed capability check and use the x64-on-ARM release path.
 
 ### PyInstaller warns about unresolved DLLs
 
@@ -119,15 +139,16 @@ contents, and the final `_internal` tree.
 Windows even when x64 application emulation is available.
 
 **Fix:** Build the x64 payload through the architecture-aware installer script. It compiles with
-`x64compatible`. The native installer uses `arm64` and is intentionally rejected everywhere else.
+`x64compatible`. No native ARM64 installer is currently produced.
 
 ### Inno Setup cannot find the payload
 
-**Cause:** The declared architecture does not have a matching
-`dist/<architecture>/Virelo/Virelo.exe` output.
+**Cause:** The declared x64 architecture does not have a matching `dist/x64/Virelo/Virelo.exe`
+output, or an unsupported ARM64 installer build was attempted without a verified native payload.
 
-**Fix:** Build and verify the application before compiling the installer. The `.iss` file derives
-its source directory from `PayloadArchitecture`; do not point an ARM64 installer at the x64 tree.
+**Fix:** Build and verify the x64 application before compiling the installer. The `.iss` file
+derives its source directory from `PayloadArchitecture`; never point an ARM64 installer at the x64
+tree or relabel the x64 output.
 
 ### Inno Setup warns about administrative install mode and per-user areas
 
@@ -148,11 +169,13 @@ other profiles.
 
 ### esbuild has the wrong architecture
 
-**Cause:** `node_modules` was reused after switching between x64 and ARM64 Node processes. The
-frontend files are portable, but esbuild is a native executable.
+**Cause:** `node_modules` was reused after switching Node process architectures. The frontend files
+are portable, but esbuild is a native executable.
 
-**Fix:** Use Node.js 24 LTS and rerun the release build. It records Node process architecture and
-runs deterministic `npm ci` installation. Do not weaken install-script security globally.
+**Fix:** Use x64 Node.js 24 LTS for the supported release and rerun the build. It records Node
+process architecture and runs deterministic `npm ci` installation. An ARM64 Node process is only
+appropriate for a future native capability check and does not make the application releasable.
+Do not weaken install-script security globally.
 `frontend/package.json` permits only the exact audited esbuild package install script,
 `frontend/.npmrc` rejects unreviewed scripts, and the macOS-only `fsevents` script is explicitly
 denied. The build verifies the resulting PE before using it. Confirm `node -p process.arch` first.

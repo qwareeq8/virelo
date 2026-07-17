@@ -9,8 +9,10 @@ and the two layers communicate through QWebChannel.
 All build scripts are in `scripts/` and use PowerShell. Run from the project root.
 
 ```powershell
-# Bootstrap architecture-qualified environments from explicit official toolchains.
+# Bootstrap the supported x64 release environment from an explicit official toolchain.
 .\scripts\bootstrap.ps1 -Architecture x64 -PythonExecutable C:\Path\To\x64\python.exe -NodeExecutable C:\Path\To\x64\node.exe
+
+# Future capability check only. This is not a release command while ARM64 Qt WebEngine is absent.
 .\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable C:\Path\To\ARM64\python.exe -NodeExecutable C:\Path\To\ARM64\node.exe
 
 # Remove all build artifacts under dist/, build/, and frontend/dist/.
@@ -29,9 +31,10 @@ All build scripts are in `scripts/` and use PowerShell. Run from the project roo
 .\scripts\verify-release.ps1 -Architecture x64
 ```
 
-Release builds must name `x64` or `arm64` explicitly. PyInstaller does not cross-compile Windows
-payloads; the selected official CPython process and native wheels determine architecture. Do not
-use Conda or Miniforge for release builds.
+Current release builds must name `x64` explicitly. The `arm64` option is reserved for fail-closed
+future capability checks and must not produce a release while upstream PySide6 ARM64 wheels omit
+Qt WebEngine. PyInstaller does not cross-compile Windows payloads; the selected official CPython
+process and native wheels determine architecture. Do not use Conda or Miniforge for release builds.
 
 ### Dev Mode
 
@@ -65,8 +68,8 @@ In a separate terminal:
 - `installer/virelo.iss`: Inno Setup installer script.
 - `Virelo.spec`: PyInstaller specification.
 - `pyproject.toml`: Project metadata, dependencies, Ruff configuration, and pytest configuration.
-- `.github/workflows/ci.yml`: Linux lint, test, and frontend jobs plus native x64, native ARM64, and
-  x64-on-ARM64 packaging validation.
+- `.github/workflows/ci.yml`: Linux lint, test, and frontend jobs, native x64 packaging, ARM64
+  dependency-capability checks, and x64-on-ARM64 emulation acceptance.
 
 ## Naming Conventions
 
@@ -110,10 +113,16 @@ In a separate terminal:
    process, interpreter, wheel, bootloader, extension-module, and frozen PE architectures. An x64
    process on Windows 11 ARM64 produces an x64 payload.
 
-6. **Never reuse one virtual environment or `node_modules` tree across architectures.** Python
-   environments are `.venv-x64` and `.venv-arm64`. Frontend builds must validate Node process
-   architecture because esbuild contains a native executable.
+6. **Never reuse one virtual environment or `node_modules` tree across architectures.** The x64
+   release environment is `.venv-x64`; `.venv-arm64` is reserved for future capability checks.
+   Frontend builds must validate Node process architecture because esbuild contains a native
+   executable.
 
 7. **Treat failed Qt hook discovery as fatal.** `QtLibraryInfo(PySide6)` failures and missing
    `qwindows.dll`, `QtWebEngineProcess.exe`, resources, or locales invalidate the bundle even when
    PyInstaller returns success.
+
+8. **Do not infer Qt WebEngine support from general Qt Windows ARM64 support.** Current PySide6
+   ARM64 wheels omit the WebEngine Python extensions and runtime. Inspect upstream wheel contents
+   and require every import, deployment, PE, and smoke check to pass before enabling native ARM64
+   packaging.
