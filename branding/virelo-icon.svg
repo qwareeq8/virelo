@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
   <!--
-    Virelo app icon - vector source of truth.
-    Generated 2026-04-23 for Phase 3 (icon-installer-visuals).
-    Tile: rounded square, fill #1C1A16 (Slate, v2 ACCENTS.slate.light).
-    Glyph: Inter 700 capital "V" flattened as a polygon path, fill #FFFFFF
-           (v2 accentOn light). ~63% of tile side length, optically centered
-           with ~18% side padding.
+    Virelo application icon and vector source of truth.
+    Generated on 2026-04-23.
+    The tile is a rounded square filled with #1C1A16 (Slate, v2 ACCENTS.slate.light).
+    The glyph is an Inter 700 capital "V" flattened as a polygon path and filled
+    with #FFFFFF (v2 accentOn light). It occupies approximately 63% of the tile,
+    is optically centered, and has approximately 18% side padding.
     Rasterize to icon.ico via scripts/build-icon.py (Pillow + Inkscape CLI).
   -->
   <rect x="0" y="0" width="256" height="256" rx="48" ry="48" fill="#1C1A16"/>

@@ -11,11 +11,14 @@ build/
 
 # Virtual environments
 .venv/
+.venv-x64/
+.venv-arm64/
 venv/
 ENV/
 
 # Testing & coverage
 .pytest_cache/
+.pytest-tmp/
 .coverage
 htmlcov/
 .ruff_cache/
@@ -24,6 +27,7 @@ htmlcov/
 # Node / Frontend
 frontend/node_modules/
 frontend/dist/
+frontend/.virelo-npm-ci.lock
 
 # PyInstaller
 *.spec.bak

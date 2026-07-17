@@ -3,11 +3,52 @@
 import re
 from pathlib import Path
 
-# Parse APP_VERSION via regex -- do NOT import virelo modules directly.
-# Importing virelo in spec context may trigger PySide6 import chain.
+from PyInstaller.utils.win32 import versioninfo
+
+# Parse APP_VERSION with a regular expression instead of importing Virelo modules.
+# Importing Virelo in the spec context may trigger the PySide6 import chain.
 _cfg = Path("virelo/app/config.py").read_text()
 _match = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', _cfg)
 APP_VERSION = _match.group(1) if _match else "0.0.0"
+
+
+def _windows_version_tuple(version):
+    """Convert an application version into four Windows WORD components."""
+    parts = version.split(".")
+    if not 1 <= len(parts) <= 4 or any(not part.isdecimal() for part in parts):
+        raise ValueError(f"APP_VERSION must contain one to four numeric components: {version!r}.")
+    values = [int(part) for part in parts]
+    if any(value > 0xFFFF for value in values):
+        raise ValueError(f"APP_VERSION components must not exceed 65535: {version!r}.")
+    return tuple(values + [0] * (4 - len(values)))
+
+
+WINDOWS_VERSION = _windows_version_tuple(APP_VERSION)
+VERSION_RESOURCE = versioninfo.VSVersionInfo(
+    ffi=versioninfo.FixedFileInfo(filevers=WINDOWS_VERSION, prodvers=WINDOWS_VERSION),
+    kids=[
+        versioninfo.StringFileInfo(
+            [
+                versioninfo.StringTable(
+                    "040904B0",
+                    [
+                        versioninfo.StringStruct("CompanyName", "Yusuf Qwareeq"),
+                        versioninfo.StringStruct("FileDescription", "Virelo"),
+                        versioninfo.StringStruct("FileVersion", APP_VERSION),
+                        versioninfo.StringStruct("InternalName", "Virelo"),
+                        versioninfo.StringStruct(
+                            "LegalCopyright", "Copyright (c) 2024 Yusuf Qwareeq"
+                        ),
+                        versioninfo.StringStruct("OriginalFilename", "Virelo.exe"),
+                        versioninfo.StringStruct("ProductName", "Virelo"),
+                        versioninfo.StringStruct("ProductVersion", APP_VERSION),
+                    ],
+                )
+            ]
+        ),
+        versioninfo.VarFileInfo([versioninfo.VarStruct("Translation", [1033, 1200])]),
+    ],
+)
 
 a = Analysis(
     ["main.py"],
@@ -15,6 +56,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ("icon.ico", "."),
+        ("LICENSE", "."),
         ("frontend/dist", "frontend/dist"),
     ],
     hiddenimports=[
@@ -49,7 +91,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # The delayed win32com makepy graph pulls in Pythonwin's MFC UI even though
+    # Virelo uses only Dispatch and never imports pywin or win32ui.
+    excludes=["pywin", "win32ui"],
     noarchive=False,
     optimize=0,
 )
@@ -68,7 +112,10 @@ exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
+    # PyInstaller does not cross-compile Windows executables. The active native
+    # Python interpreter and its bootloader determine the output architecture.
     target_arch=None,
+    version=VERSION_RESOURCE,
     codesign_identity=None,
     entitlements_file=None,
     icon=["icon.ico"],

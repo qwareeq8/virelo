@@ -6,89 +6,533 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: '3.12'
-          cache: 'pip'
-      - run: pip install ruff
-      - run: ruff check .
-      - run: ruff format --check .
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements/build-constraints.txt
+      - name: Install the constrained lint environment
+        run: |
+          python -m pip install --constraint requirements/build-constraints.txt ruff
+          python -m pip check
+      - name: Check Python lint and formatting
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
 
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: '3.12'
-          cache: 'pip'
-      - run: pip install -e ".[dev]"
-      - run: pytest tests/unit/ -q
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/build-constraints.txt
+      - name: Install the constrained test environment
+        run: |
+          python -m pip install --constraint requirements/build-constraints.txt --editable ".[dev]"
+          python -m pip check
+      - name: Run non-Qt Python tests
+        run: python -m pytest -m "not requires_qt" -q
 
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: "24"
+          cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
+      - name: Install locked frontend dependencies
+        run: npm ci
         working-directory: frontend
-      - run: npm run build
+      - name: Audit the complete and shipped dependency trees
         working-directory: frontend
-      - run: npx vitest run
+        run: |
+          npm audit --audit-level=low
+          npm audit --omit=dev --audit-level=low
+      - name: Test and build the frontend
         working-directory: frontend
+        run: |
+          npm test
+          npm run build
 
   stale-name:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - name: Check for stale legacy-name references
-        # ci.yml, verify-release.ps1, and CLAUDE.md legitimately contain the word
-        # in their own check logic or rules, so they are excluded by name.
+        # The workflow and CLAUDE.md legitimately contain the legacy word in
+        # their own check logic or rules, so they are excluded by path.
         run: |
-          if grep -rniw "toolbox" . \
-            --include="*.py" --include="*.jsx" --include="*.js" \
-            --include="*.json" --include="*.toml" --include="*.yml" \
-            --include="*.iss" --include="*.spec" --include="*.md" \
-            --include="*.ps1" --include="*.txt" \
-            --exclude-dir=node_modules --exclude-dir=.git \
-            --exclude-dir=dist --exclude-dir=build \
-            --exclude-dir=.planning --exclude-dir=.venv \
-            --exclude=ci.yml --exclude=verify-release.ps1 --exclude=CLAUDE.md; then
-            echo "ERROR: Found stale legacy-name references"
+          if git grep -InEi 'toolbox' -- . \
+            ':(exclude).github/workflows/ci.yml' \
+            ':(exclude)CLAUDE.md'; then
+            echo "ERROR: Found stale legacy-name references."
             exit 1
           fi
-          echo "OK: No stale references found"
+          echo "OK: No stale references were found."
 
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Check version consistency (config.py vs package.json)
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - name: Check version consistency
+        shell: bash
         run: |
           PY_VERSION=$(grep -oP 'APP_VERSION\s*=\s*"\K[^"]+' virelo/app/config.py)
           PKG_VERSION=$(grep -oP '"version"\s*:\s*"\K[^"]+' frontend/package.json | head -n1)
-          echo "config.py APP_VERSION:  $PY_VERSION"
-          echo "package.json version:   $PKG_VERSION"
-          if [ "$PY_VERSION" != "$PKG_VERSION" ]; then
-            echo "ERROR: Version mismatch"
+          LOCK_VERSION=$(grep -oP '"version"\s*:\s*"\K[^"]+' frontend/package-lock.json | head -n1)
+          echo "config.py APP_VERSION: $PY_VERSION."
+          echo "package.json version: $PKG_VERSION."
+          echo "package-lock.json version: $LOCK_VERSION."
+          if [ "$PY_VERSION" != "$PKG_VERSION" ] || [ "$PY_VERSION" != "$LOCK_VERSION" ]; then
+            echo "ERROR: Version mismatch."
             exit 1
           fi
-          echo "OK: Versions match ($PY_VERSION)"
+          echo "OK: Versions match ($PY_VERSION)."
       - name: Check pyproject.toml keeps the version dynamic
-        # The package version must resolve from virelo/app/config.py, the single
-        # source of truth. A static version in pyproject.toml would reintroduce drift.
         run: |
           if ! grep -q 'dynamic = \["version"\]' pyproject.toml; then
-            echo 'ERROR: pyproject.toml must declare dynamic = ["version"] so the version derives from virelo/app/config.py'
+            echo 'ERROR: pyproject.toml must derive its version from virelo/app/config.py.'
             exit 1
           fi
-          echo "OK: pyproject.toml version is dynamic"
+          echo "OK: pyproject.toml version is dynamic."
+
+  windows-package:
+    name: Windows ${{ matrix.architecture }} package
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            python-architecture: x64
+            runner: windows-2025
+          - architecture: arm64
+            python-architecture: arm64
+            runner: windows-11-arm
+    env:
+      VIRELO_TARGET_ARCHITECTURE: ${{ matrix.architecture }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+          architecture: ${{ matrix.python-architecture }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/build-constraints.txt
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install the pinned official Inno Setup compiler
+        shell: pwsh
+        run: |
+          function Wait-CiProcess($Process, [int] $TimeoutSeconds, [string] $Description) {
+            if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+              throw "$Description timed out after $TimeoutSeconds seconds."
+            }
+            $Process.Refresh()
+          }
+          $version = "6.7.3"
+          $expectedSha256 = "9c73c3bae7ed48d44112a0f48e66742c00090bdb5bef71d9d3c056c66e97b732"
+          $download = Join-Path $env:RUNNER_TEMP "innosetup-$version.exe"
+          $installDirectory = Join-Path $env:RUNNER_TEMP "Inno Setup $version"
+          $url = "https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-$version.exe"
+          Invoke-WebRequest -Uri $url -OutFile $download
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "The official Inno Setup installer hash is $actualSha256; expected $expectedSha256."
+          }
+          $install = Start-Process -FilePath $download -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            ('/DIR="{0}"' -f $installDirectory)
+          ) -PassThru
+          Wait-CiProcess $install 300 "The pinned Inno Setup installer"
+          if ($install.ExitCode -ne 0) {
+            throw "The pinned Inno Setup installer failed with exit code $($install.ExitCode)."
+          }
+          $iscc = Join-Path $installDirectory "ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            throw "The pinned Inno Setup compiler was not installed at $iscc."
+          }
+          $compilerVersion = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion.Trim()
+          if ($compilerVersion -notmatch '^6\.7\.3(?:\D|$)') {
+            throw "Expected Inno Setup 6.7.3; found $compilerVersion at $iscc."
+          }
+          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Inno Setup ${compilerVersion}: $iscc."
+      - name: Report native operating-system and process architectures
+        shell: pwsh
+        run: |
+          Write-Host "Windows: $([Environment]::OSVersion.VersionString)."
+          Write-Host "OS architecture: $([Runtime.InteropServices.RuntimeInformation]::OSArchitecture)."
+          Write-Host "PowerShell process architecture: $([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)."
+          python -c "import os, platform, struct, sys; print('sys.executable:', sys.executable); print('sys.version:', sys.version); print('platform.machine():', platform.machine()); print('pointer_bits:', struct.calcsize('P') * 8); print('CONDA_PREFIX:', os.environ.get('CONDA_PREFIX'))"
+          if ($LASTEXITCODE -ne 0) { throw "Python architecture diagnostics failed." }
+          node -p "JSON.stringify({execPath: process.execPath, arch: process.arch, platform: process.platform, version: process.version})"
+          if ($LASTEXITCODE -ne 0) { throw "Node architecture diagnostics failed." }
+      - name: Bootstrap the architecture-qualified environment
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          $node = (Get-Command node).Source
+          .\scripts\bootstrap.ps1 -Architecture $env:VIRELO_TARGET_ARCHITECTURE -PythonExecutable $python -NodeExecutable $node
+      - name: Run isolated Qt and Windows ABI import preflights
+        shell: pwsh
+        run: |
+          $python = ".venv-$env:VIRELO_TARGET_ARCHITECTURE\Scripts\python.exe"
+          & $python -I -c "from PySide6 import QtCore, QtWidgets, QtWebEngineCore, QtWebEngineWidgets; print(QtCore.qVersion())"
+          if ($LASTEXITCODE -ne 0) { throw "The isolated PySide6 import preflight failed." }
+          & $python -I -c "import win32api, win32gui, win32event, pythoncom, pywintypes, comtypes"
+          if ($LASTEXITCODE -ne 0) { throw "The isolated Windows ABI import preflight failed." }
+      - name: Run the complete Windows test suite
+        shell: pwsh
+        run: |
+          $python = ".venv-$env:VIRELO_TARGET_ARCHITECTURE\Scripts\python.exe"
+          & $python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { throw "Windows tests failed." }
+      - name: Build the architecture-qualified application and installer
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          $node = (Get-Command node).Source
+          .\scripts\build-installer.ps1 -Architecture $env:VIRELO_TARGET_ARCHITECTURE -PythonExecutable $python -NodeExecutable $node
+      - name: Verify PE architecture, Qt deployment, and frozen smoke test
+        shell: pwsh
+        run: .\scripts\verify-release.ps1 -Architecture $env:VIRELO_TARGET_ARCHITECTURE
+      - name: Install, smoke-test, and uninstall the target payload
+        shell: pwsh
+        run: |
+          function Wait-CiProcess($Process, [int] $TimeoutSeconds, [string] $Description) {
+            if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+              throw "$Description timed out after $TimeoutSeconds seconds."
+            }
+            $Process.Refresh()
+          }
+          $architecture = $env:VIRELO_TARGET_ARCHITECTURE
+          $reportDirectory = Join-Path $PWD "build\$architecture\installed"
+          New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+
+          $installer = @(
+            Get-ChildItem -LiteralPath "installer\dist" -Filter "VireloSetup-*-$architecture.exe"
+          )
+          if ($installer.Count -ne 1) {
+            throw "Expected exactly one architecture-qualified $architecture installer."
+          }
+
+          $installDirectory = Join-Path $env:RUNNER_TEMP "Virelo-$architecture-native"
+          $python = ".venv-$architecture\Scripts\python.exe"
+          $installArguments = @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/NOICONS",
+            ('/DIR="{0}"' -f $installDirectory)
+          )
+          $install = Start-Process `
+            -FilePath $installer[0].FullName `
+            -ArgumentList $installArguments `
+            -PassThru
+          Wait-CiProcess $install 300 "The $architecture installer"
+          if ($install.ExitCode -ne 0) {
+            throw "The $architecture installer failed with exit code $($install.ExitCode)."
+          }
+
+          $uninstaller = $null
+          try {
+            $uninstallerCandidates = @(
+              Get-ChildItem -LiteralPath $installDirectory -Filter "unins*.exe"
+            )
+            if ($uninstallerCandidates.Count -ne 1) {
+              throw "Expected exactly one generated Inno Setup uninstaller bootstrap."
+            }
+            $uninstaller = $uninstallerCandidates[0]
+
+            $sourceManifest = "dist\$architecture\Virelo\.release.json"
+            $installedManifest = Join-Path $installDirectory ".release.json"
+            if (-not (Test-Path -LiteralPath $sourceManifest -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $installedManifest -PathType Leaf)) {
+              throw "The verified payload manifest was not preserved by the installer."
+            }
+            $sourceManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceManifest).Hash
+            $installedManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedManifest).Hash
+            if ($sourceManifestHash -ne $installedManifestHash) {
+              throw "The installed payload manifest differs from the verified source manifest."
+            }
+            $installedManifestData = Get-Content -LiteralPath $installedManifest -Raw | ConvertFrom-Json
+            if ($installedManifestData.architecture -ne $architecture) {
+              throw "The installed payload manifest is not $architecture."
+            }
+
+            $payloadPeFiles = @(
+              Get-ChildItem -LiteralPath $installDirectory -Recurse -File |
+                Where-Object {
+                  $_.Extension -in @(".exe", ".dll", ".pyd", ".node", ".ocx") -and
+                  $_.Name -notlike "unins*.exe"
+                } |
+                Select-Object -ExpandProperty FullName
+            )
+            if ($payloadPeFiles.Count -eq 0) {
+              throw "The installed $architecture payload contains no PE files."
+            }
+            & $python scripts\pe_arch.py `
+              --expected $architecture `
+              --json "$reportDirectory\installed-pe.json" `
+              @payloadPeFiles
+            if ($LASTEXITCODE -ne 0) {
+              throw "The installed $architecture PE scan failed."
+            }
+
+            & $python scripts\pe_arch.py `
+              --json "$reportDirectory\uninstaller-bootstrap-pe.json" `
+              $uninstaller.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "The generated Inno Setup uninstaller is not a recognized PE executable."
+            }
+
+            $smokeReport = Join-Path $reportDirectory "installed-smoke.json"
+            $smoke = Start-Process `
+              -FilePath "$installDirectory\Virelo.exe" `
+              -ArgumentList "--smoke-test", "--smoke-report", $smokeReport `
+              -PassThru
+            Wait-CiProcess $smoke 90 "The installed $architecture smoke test"
+            if ($smoke.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $smokeReport -PathType Leaf)) {
+              throw "The installed $architecture smoke test failed to produce passing evidence."
+            }
+            $smokeData = Get-Content -LiteralPath $smokeReport -Raw | ConvertFrom-Json
+            $failedChecks = @($smokeData.checks | Where-Object { -not $_.passed })
+            if ($smokeData.schemaVersion -ne 1 -or
+                $smokeData.application -ne "Virelo" -or
+                $smokeData.version -ne $installedManifestData.version -or
+                -not $smokeData.frozen -or
+                $smokeData.processArchitecture -ne $architecture -or
+                $smokeData.pointerBits -ne 64 -or
+                $smokeData.exitCode -ne 0 -or
+                $smokeData.failed -ne 0 -or
+                $failedChecks.Count -ne 0) {
+              throw "The installed $architecture smoke report did not prove a healthy native payload."
+            }
+          }
+          finally {
+            if ($uninstaller) {
+              $uninstall = Start-Process `
+                -FilePath $uninstaller.FullName `
+                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
+                -PassThru
+              Wait-CiProcess $uninstall 300 "The $architecture uninstaller"
+              if ($uninstall.ExitCode -ne 0) {
+                throw "The $architecture uninstaller failed with exit code $($uninstall.ExitCode)."
+              }
+              for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                if (-not (Test-Path -LiteralPath "$installDirectory\Virelo.exe") -and
+                    -not (Test-Path -LiteralPath "$installDirectory\_internal")) {
+                  break
+                }
+                Start-Sleep -Seconds 1
+              }
+              if ((Test-Path -LiteralPath "$installDirectory\Virelo.exe") -or
+                  (Test-Path -LiteralPath "$installDirectory\_internal")) {
+                throw "Uninstall completed but left Virelo application payload files behind."
+              }
+            }
+          }
+      - name: Upload the verified package and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: virelo-windows-${{ matrix.architecture }}
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            dist/${{ matrix.architecture }}/Virelo/
+            installer/dist/VireloSetup-*-${{ matrix.architecture }}.exe
+            installer/dist/VireloSetup-*-${{ matrix.architecture }}-manifest.txt
+            frontend/dist/
+            build/${{ matrix.architecture }}/**/*.json
+            build/${{ matrix.architecture }}/**/warn-Virelo.txt
+            build/${{ matrix.architecture }}/**/xref-Virelo.html
+            build/${{ matrix.architecture }}/**/Analysis-00.toc
+            build/${{ matrix.architecture }}/**/COLLECT-00.toc
+            build/${{ matrix.architecture }}/pyinstaller.log
+            build/${{ matrix.architecture }}/inno-setup.log
+            build/${{ matrix.architecture }}/pip-freeze.txt
+
+  x64-on-arm:
+    name: Windows ARM64 x64-emulation acceptance
+    needs: windows-package
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+          architecture: x64
+      - name: Download the exact x64 artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: virelo-windows-x64
+          path: .
+      - name: Confirm the emulated process architecture
+        shell: pwsh
+        run: |
+          $osArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+          Write-Host "OS architecture: $osArchitecture."
+          Write-Host "PowerShell process architecture: $([Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture)."
+          if ($osArchitecture -ne [Runtime.InteropServices.Architecture]::Arm64) {
+            throw "The x64-emulation acceptance job is not running on an ARM64 operating system."
+          }
+          $python = (Get-Command python).Source
+          python -c "import platform, struct, sys; print('sys.executable:', sys.executable); print('platform.machine():', platform.machine()); print('pointer_bits:', struct.calcsize('P') * 8)"
+          if ($LASTEXITCODE -ne 0) { throw "x64 Python did not run under emulation." }
+          & $python -I scripts\verify_python_environment.py --architecture x64 --mode base --report "build\x64-on-arm\python-environment.json"
+          if ($LASTEXITCODE -ne 0) { throw "The emulated Python process is not a verified official x64 CPython process." }
+          & $python scripts\pe_arch.py --expected x64 --json "build\x64-on-arm\python-pe.json" $python
+          if ($LASTEXITCODE -ne 0) { throw "The emulated Python executable is not x64." }
+      - name: Install, verify, smoke-test, and uninstall the x64 payload
+        shell: pwsh
+        run: |
+          function Wait-CiProcess($Process, [int] $TimeoutSeconds, [string] $Description) {
+            if (-not $Process.WaitForExit($TimeoutSeconds * 1000)) {
+              Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+              throw "$Description timed out after $TimeoutSeconds seconds."
+            }
+            $Process.Refresh()
+          }
+          $reportDirectory = Join-Path $PWD "build\x64-on-arm"
+          New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
+          $installer = @(
+            Get-ChildItem -LiteralPath "installer\dist" -Filter "VireloSetup-*-x64.exe"
+          )
+          if ($installer.Count -ne 1) { throw "Expected exactly one architecture-qualified x64 installer." }
+          $installDirectory = Join-Path $env:RUNNER_TEMP "Virelo-x64-emulated"
+          $python = (Get-Command python).Source
+          & $python scripts\pe_arch.py --json "$reportDirectory\installer-bootstrap-pe.json" $installer[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw "The downloaded installer bootstrap is not a recognized PE executable." }
+          $installArguments = @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/NOICONS",
+            ('/DIR="{0}"' -f $installDirectory)
+          )
+          $install = Start-Process -FilePath $installer[0].FullName -ArgumentList $installArguments -PassThru
+          Wait-CiProcess $install 300 "The x64 installer under ARM64 emulation"
+          if ($install.ExitCode -ne 0) { throw "The x64 installer was rejected or failed with exit code $($install.ExitCode)." }
+
+          $uninstaller = $null
+          try {
+            $uninstallerCandidates = @(
+              Get-ChildItem -LiteralPath $installDirectory -Filter "unins*.exe"
+            )
+            if ($uninstallerCandidates.Count -ne 1) { throw "Expected exactly one generated Inno Setup uninstaller bootstrap." }
+            $uninstaller = $uninstallerCandidates[0]
+
+            $sourceManifest = "dist\x64\Virelo\.release.json"
+            $installedManifest = Join-Path $installDirectory ".release.json"
+            if (-not (Test-Path -LiteralPath $sourceManifest -PathType Leaf) -or
+                -not (Test-Path -LiteralPath $installedManifest -PathType Leaf)) {
+              throw "The verified payload manifest was not preserved by the installer."
+            }
+            $sourceManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceManifest).Hash
+            $installedManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedManifest).Hash
+            if ($sourceManifestHash -ne $installedManifestHash) {
+              throw "The installer payload manifest differs from the verified x64 source manifest."
+            }
+            $installedManifestData = Get-Content -LiteralPath $installedManifest -Raw | ConvertFrom-Json
+            if ($installedManifestData.architecture -ne "x64") {
+              throw "The installed payload manifest is not x64."
+            }
+
+            # Inno Setup's generated uninstaller is a bootstrap executable and may
+            # be x86. Verify every executable/loadable application payload file,
+            # while treating only that compiler-generated bootstrap as packaging
+            # infrastructure rather than part of Virelo's process image.
+            $payloadPeFiles = @(
+              Get-ChildItem -LiteralPath $installDirectory -Recurse -File |
+                Where-Object {
+                  $_.Extension -in @(".exe", ".dll", ".pyd", ".node", ".ocx") -and
+                  $_.Name -notlike "unins*.exe"
+                } |
+                Select-Object -ExpandProperty FullName
+            )
+            if ($payloadPeFiles.Count -eq 0) { throw "The installed x64 payload contains no PE files." }
+            & $python scripts\pe_arch.py --expected x64 --json "$reportDirectory\installed-pe.json" @payloadPeFiles
+            if ($LASTEXITCODE -ne 0) { throw "The installed x64 PE scan failed." }
+
+            & $python scripts\pe_arch.py --json "$reportDirectory\uninstaller-bootstrap-pe.json" $uninstaller.FullName
+            if ($LASTEXITCODE -ne 0) { throw "The generated Inno Setup uninstaller is not a recognized PE executable." }
+
+            $smokeReport = Join-Path $reportDirectory "installed-smoke.json"
+            $smoke = Start-Process -FilePath "$installDirectory\Virelo.exe" `
+              -ArgumentList "--smoke-test", "--smoke-report", $smokeReport -PassThru
+            Wait-CiProcess $smoke 90 "The installed x64 smoke test under ARM64 emulation"
+            if ($smoke.ExitCode -ne 0) { throw "The installed x64 smoke test failed with exit code $($smoke.ExitCode)." }
+            if (-not (Test-Path -LiteralPath $smokeReport -PathType Leaf)) {
+              throw "The installed x64 smoke report was not written."
+            }
+            $smokeData = Get-Content -LiteralPath $smokeReport -Raw | ConvertFrom-Json
+            $failedChecks = @($smokeData.checks | Where-Object { -not $_.passed })
+            if ($smokeData.schemaVersion -ne 1 -or
+                $smokeData.application -ne "Virelo" -or
+                $smokeData.version -ne $installedManifestData.version -or
+                -not $smokeData.frozen -or
+                $smokeData.processArchitecture -ne "x64" -or
+                $smokeData.pointerBits -ne 64 -or
+                $smokeData.exitCode -ne 0 -or
+                $smokeData.failed -ne 0 -or
+                $failedChecks.Count -ne 0) {
+              throw "The installed x64 smoke report did not prove a healthy emulated payload."
+            }
+          }
+          finally {
+            if ($uninstaller) {
+              $uninstall = Start-Process -FilePath $uninstaller.FullName `
+                -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -PassThru
+              Wait-CiProcess $uninstall 300 "The x64 uninstaller under ARM64 emulation"
+              if ($uninstall.ExitCode -ne 0) { throw "The x64 uninstaller failed with exit code $($uninstall.ExitCode)." }
+              for ($attempt = 0; $attempt -lt 10; $attempt++) {
+                if (-not (Test-Path -LiteralPath "$installDirectory\Virelo.exe") -and
+                    -not (Test-Path -LiteralPath "$installDirectory\_internal")) {
+                  break
+                }
+                Start-Sleep -Seconds 1
+              }
+              if ((Test-Path -LiteralPath "$installDirectory\Virelo.exe") -or
+                  (Test-Path -LiteralPath "$installDirectory\_internal")) {
+                throw "Uninstall completed but left Virelo application payload files behind."
+              }
+            }
+          }
+      - name: Upload x64-on-ARM64 acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: virelo-windows-x64-on-arm-evidence
+          if-no-files-found: warn
+          path: build/x64-on-arm/*.json

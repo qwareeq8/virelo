@@ -1,148 +1,435 @@
+param(
+    [ValidateSet("auto", "x64", "arm64")]
+    [string] $Architecture = "auto"
+)
+
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+. "$PSScriptRoot\build-common.ps1"
 
-$projectRoot = Resolve-Path "$PSScriptRoot\.."
-Set-Location $projectRoot
+function Assert-VireloSmokeReport {
+    param(
+        [Parameter(Mandatory)]
+        [object] $Report,
 
-Write-Host "[verify-release] Checking build artifacts..."
+        [Parameter(Mandatory)]
+        [string] $ReportPath,
 
-$errors = @()
+        [Parameter(Mandatory)]
+        [string] $ExpectedArchitecture,
 
-# --- Read expected version ---
-$versionMatch = Select-String -Path "virelo\app\config.py" -Pattern 'APP_VERSION\s*=\s*"([^"]+)"'
-if (-not $versionMatch) {
-    $errors += "APP_VERSION not found in virelo/app/config.py"
-} else {
-    $AppVersion = $versionMatch.Matches.Groups[1].Value
-    Write-Host "[verify-release] Expected version: $AppVersion"
-}
+        [Parameter(Mandatory)]
+        [string] $ExpectedVersion,
 
-# --- Check frontend build ---
-if (-not (Test-Path "frontend\dist\index.html")) {
-    $errors += "Missing: frontend\dist\index.html"
-} else {
-    Write-Host "[verify-release] OK: frontend/dist/index.html"
-}
+        [Parameter(Mandatory)]
+        [bool] $ExpectedFrozen
+    )
 
-# --- Check PyInstaller output ---
-if (-not (Test-Path "dist\Virelo\Virelo.exe")) {
-    $errors += "Missing: dist\Virelo\Virelo.exe"
-} else {
-    Write-Host "[verify-release] OK: dist/Virelo/Virelo.exe"
-}
-
-# --- Check installer output ---
-if (-not (Test-Path "installer\dist\VireloSetup.exe")) {
-    $errors += "Missing: installer\dist\VireloSetup.exe"
-} else {
-    Write-Host "[verify-release] OK: installer/dist/VireloSetup.exe"
-}
-
-# --- Check Virelo.spec exists ---
-if (-not (Test-Path "Virelo.spec")) {
-    $errors += "Missing: Virelo.spec"
-} else {
-    Write-Host "[verify-release] OK: Virelo.spec"
-}
-
-# --- Check no stale name ---
-if (Test-Path "Windows Toolbox.spec") {
-    $errors += "Stale file found: Windows Toolbox.spec (should have been renamed to Virelo.spec)"
-}
-
-# --- Version cross-check (config.py vs package.json) ---
-$pkgJson = Get-Content "frontend\package.json" | ConvertFrom-Json
-$pkgJsonVersion = $pkgJson.version
-if ($AppVersion -ne $pkgJsonVersion) {
-    $errors += "Version mismatch: config.py=$AppVersion, package.json=$pkgJsonVersion"
-} else {
-    Write-Host "[verify-release] OK: Versions match ($AppVersion)"
-}
-
-# --- Version cross-check (Virelo.spec regex vs config.py) ---
-# The spec file parses APP_VERSION via regex at build time. Apply the same regex here
-# so a spec that silently fails to parse the version cannot go unnoticed.
-if (Test-Path "Virelo.spec") {
-    $specRegexLine = Select-String -Path "Virelo.spec" -Pattern "re\.search\(r'([^']+)'"
-    if ($specRegexLine) {
-        $specPattern = $specRegexLine.Matches.Groups[1].Value
-        $configText = Get-Content "virelo\app\config.py" -Raw
-        $specParse = [regex]::Match($configText, $specPattern)
-        if (-not $specParse.Success) {
-            $errors += "Virelo.spec version regex does not match virelo/app/config.py"
-        } elseif ($specParse.Groups[1].Value -ne $AppVersion) {
-            $errors += "Version mismatch: config.py=$AppVersion, Virelo.spec parse=$($specParse.Groups[1].Value)"
-        } else {
-            Write-Host "[verify-release] OK: Virelo.spec regex parses version $AppVersion"
+    $requiredProperties = @(
+        "schemaVersion",
+        "application",
+        "version",
+        "frozen",
+        "processArchitecture",
+        "pointerBits",
+        "checks",
+        "passed",
+        "failed",
+        "exitCode"
+    )
+    $propertyNames = @($Report.PSObject.Properties.Name)
+    foreach ($property in $requiredProperties) {
+        if ($propertyNames -notcontains $property) {
+            throw "Smoke report '$ReportPath' is missing required property '$property'."
         }
-    } else {
-        Write-Host "[verify-release] WARNING: Could not locate the version regex in Virelo.spec, skipping spec parse check"
+    }
+
+    if ([int] $Report.schemaVersion -ne 1) {
+        throw "Smoke report '$ReportPath' has schemaVersion '$($Report.schemaVersion)'; expected 1."
+    }
+    if ([string] $Report.application -cne "Virelo") {
+        throw "Smoke report '$ReportPath' is for '$($Report.application)'; expected Virelo."
+    }
+    if ([string] $Report.version -cne $ExpectedVersion) {
+        throw "Smoke report '$ReportPath' has version '$($Report.version)'; expected '$ExpectedVersion'."
+    }
+    if ($Report.frozen -isnot [bool] -or [bool] $Report.frozen -ne $ExpectedFrozen) {
+        throw "Smoke report '$ReportPath' has frozen='$($Report.frozen)'; expected '$ExpectedFrozen'."
+    }
+    if ([string] $Report.processArchitecture -cne $ExpectedArchitecture) {
+        throw "Smoke report '$ReportPath' has processArchitecture '$($Report.processArchitecture)'; expected '$ExpectedArchitecture'."
+    }
+    if ([int] $Report.pointerBits -ne 64) {
+        throw "Smoke report '$ReportPath' has pointerBits '$($Report.pointerBits)'; expected 64."
+    }
+    if ([int] $Report.exitCode -ne 0 -or [int] $Report.failed -ne 0) {
+        throw "Smoke report '$ReportPath' reports exitCode=$($Report.exitCode), failed=$($Report.failed)."
+    }
+
+    $checks = @($Report.checks)
+    if ($checks.Count -eq 0 -or [int] $Report.passed -ne $checks.Count) {
+        throw "Smoke report '$ReportPath' has inconsistent or empty check results."
+    }
+    foreach ($check in $checks) {
+        $checkProperties = @($check.PSObject.Properties.Name)
+        if ($checkProperties -notcontains "name" -or $checkProperties -notcontains "passed") {
+            throw "Smoke report '$ReportPath' contains a check without name/passed evidence."
+        }
+    }
+    $failedChecks = @(
+        $checks | Where-Object { $_.passed -isnot [bool] -or -not [bool] $_.passed }
+    )
+    if ($failedChecks.Count -gt 0) {
+        $failedNames = @($failedChecks | ForEach-Object { $_.name }) -join ", "
+        throw "Smoke report '$ReportPath' contains failed checks: $failedNames."
+    }
+
+    $webEngineChecks = @(
+        $checks | Where-Object { $_.name -ceq "Qt WebEngine minimal page load" }
+    )
+    if ($webEngineChecks.Count -ne 1) {
+        throw "Smoke report '$ReportPath' must contain exactly one Qt WebEngine minimal page load check."
+    }
+    $webEngine = $webEngineChecks[0]
+    $webEngineProperties = @($webEngine.PSObject.Properties.Name)
+    if ($webEngineProperties -notcontains "details" -or $null -eq $webEngine.details) {
+        throw "Smoke report '$ReportPath' WebEngine check is missing details evidence."
+    }
+    $detailNames = @($webEngine.details.PSObject.Properties.Name)
+    foreach ($property in @("loadFinished", "title", "documentMarker", "documentBytes")) {
+        if ($detailNames -notcontains $property) {
+            throw "Smoke report '$ReportPath' WebEngine evidence is missing '$property'."
+        }
+    }
+    if ($webEngine.details.loadFinished -isnot [bool] -or
+        -not [bool] $webEngine.details.loadFinished -or
+        [string] $webEngine.details.title -cne "Virelo WebEngine Smoke" -or
+        [string] $webEngine.details.documentMarker -cne "virelo-smoke-ready" -or
+        [int] $webEngine.details.documentBytes -le 0) {
+        throw "Smoke report '$ReportPath' contains invalid Qt WebEngine page-load evidence."
     }
 }
 
-# --- Version cross-check (installed package metadata vs config.py) ---
-# The package version is dynamic in pyproject.toml and resolves from APP_VERSION.
-# This check is skipped with a warning when no venv exists.
-$venvPython = ".venv\Scripts\python.exe"
-if (Test-Path $venvPython) {
-    $installedVersion = (& $venvPython -c "import importlib.metadata; print(importlib.metadata.version('virelo'))" 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[verify-release] WARNING: Could not read the installed virelo package version, skipping metadata check"
-    } elseif ($installedVersion -ne $AppVersion) {
-        $errors += "Version mismatch: config.py=$AppVersion, installed package=$installedVersion"
-    } else {
-        Write-Host "[verify-release] OK: Installed package version matches ($AppVersion)"
+function Assert-VireloFileVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path,
+
+        [Parameter(Mandatory)]
+        [string] $ExpectedVersion
+    )
+
+    $versionInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($Path)
+    $fileVersion = ([string] $versionInfo.FileVersion).Trim()
+    $productVersion = ([string] $versionInfo.ProductVersion).Trim()
+    if ($fileVersion -cne $ExpectedVersion -or $productVersion -cne $ExpectedVersion) {
+        throw "'$Path' embeds file/product version '$fileVersion'/'$productVersion'; expected '$ExpectedVersion'."
     }
-} else {
-    Write-Host "[verify-release] WARNING: .venv not found, skipping installed package version check"
-}
-
-# --- Bundled icon.ico in dist/ (PyInstaller 6 onedir places datas under _internal/) ---
-if (-not (Test-Path "dist\Virelo\_internal\icon.ico")) {
-    $errors += "Missing: dist\Virelo\_internal\icon.ico"
-} else {
-    Write-Host "[verify-release] OK: dist/Virelo/_internal/icon.ico"
-}
-
-# --- Bundled frontend/dist/ in dist/ (PyInstaller 6 onedir places datas under _internal/) ---
-if (-not (Test-Path "dist\Virelo\_internal\frontend\dist\index.html")) {
-    $errors += "Missing: dist\Virelo\_internal\frontend\dist\index.html"
-} else {
-    Write-Host "[verify-release] OK: dist/Virelo/_internal/frontend/dist/index.html"
-}
-
-# --- No stale naming in dist/ ---
-$staleFiles = Get-ChildItem "dist\Virelo" -Recurse -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -match "(?i)windows.toolbox|(?i)toolbox" }
-if ($staleFiles) {
-    $errors += "Stale naming found in dist/: $($staleFiles.Name -join ', ')"
-} else {
-    Write-Host "[verify-release] OK: No stale naming in dist/"
-}
-
-# --- Freshness: the built exe must be newer than the newest tracked source ---
-# Guards against shipping a stale build whose version string still matches.
-$exePath = "dist\Virelo\Virelo.exe"
-if (Test-Path $exePath) {
-    $exeTime = (Get-Item $exePath).LastWriteTimeUtc
-    $newestSource = Get-ChildItem -Recurse -File -Include *.py, *.jsx, *.js, *.css `
-        -Path "virelo", "frontend\src" -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
-    if ($newestSource -and $newestSource.LastWriteTimeUtc -gt $exeTime) {
-        $errors += "Stale build: $exePath predates $($newestSource.FullName). Rebuild before releasing."
-    } else {
-        Write-Host "[verify-release] OK: Build is newer than tracked source"
+    if (([string] $versionInfo.ProductName).Trim() -cne "Virelo") {
+        throw "'$Path' does not embed the expected Virelo product identity."
     }
 }
 
-# --- Report ---
-if ($errors.Count -gt 0) {
-    Write-Host ""
-    Write-Host "[verify-release] FAILED: $($errors.Count) issue(s) found:" -ForegroundColor Red
-    foreach ($err in $errors) {
-        Write-Host "  - $err" -ForegroundColor Red
+$context = Get-VireloBuildContext -Architecture $Architecture
+Push-Location -LiteralPath $context.Root
+try {
+    $version = Get-VireloAppVersion $context.Root
+    $manifestPath = Join-Path $context.BundlePath ".release.json"
+    $installerPath = Join-Path $context.Root "installer\dist\VireloSetup-$version-$($context.Architecture).exe"
+    $installerOutputManifestPath = Join-Path $context.Root "installer\dist\VireloSetup-$version-$($context.Architecture)-manifest.txt"
+    $installerEvidencePath = Join-Path $context.BuildRoot "installer.json"
+    $innoLogPath = Join-Path $context.BuildRoot "inno-setup.log"
+    $innoVersionProbeLogPath = Join-Path $context.BuildRoot "inno-setup-version-probe.log"
+
+    Write-Host "[verify-release] Verifying $($context.Architecture) release evidence..."
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Missing verified payload manifest: $manifestPath."
     }
-    throw "Release verification failed"
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ($manifest.architecture -ne $context.Architecture) {
+        throw "Manifest architecture '$($manifest.architecture)' does not match requested '$($context.Architecture)'."
+    }
+    if ($manifest.version -ne $version) {
+        throw "Manifest version '$($manifest.version)' does not match APP_VERSION '$version'."
+    }
+
+    $package = Get-Content -LiteralPath "frontend\package.json" -Raw | ConvertFrom-Json
+    $lockVersions = @(
+        & $context.Python -I -c "import json; data=json.load(open('frontend/package-lock.json', encoding='utf-8')); print(data['version']); print(data['packages']['']['version'])"
+    )
+    if ($LASTEXITCODE -ne 0 -or $lockVersions.Count -ne 2) {
+        throw "Could not read root versions from frontend/package-lock.json."
+    }
+    if ($package.version -ne $version -or
+        $lockVersions[0] -ne $version -or
+        $lockVersions[1] -ne $version) {
+        throw "Version mismatch among APP_VERSION, package.json, and package-lock.json."
+    }
+
+    $head = (& git -C $context.Root rev-parse HEAD | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $manifest.sourceCommit -ne $head) {
+        throw "The payload was not built from the current HEAD. Manifest: $($manifest.sourceCommit); current: $head."
+    }
+    $sourceFingerprint = Get-VireloSourceFingerprint $context.Root
+    if ($manifest.sourceFingerprint -ne $sourceFingerprint) {
+        throw "Tracked or untracked release inputs changed after the payload was built. Rebuild $($context.Architecture)."
+    }
+    $payloadFingerprint = Get-VireloDirectoryFingerprint `
+        -Directory $context.BundlePath `
+        -ExcludeNames @(".release.json")
+    if ($manifest.payloadFingerprint -ne $payloadFingerprint) {
+        throw "The frozen payload changed after PE/Qt verification. Rebuild $($context.Architecture)."
+    }
+
+    $requiredFiles = @(
+        (Join-Path $context.BundlePath "Virelo.exe"),
+        (Join-Path $context.BundlePath "_internal\icon.ico"),
+        (Join-Path $context.BundlePath "_internal\LICENSE"),
+        (Join-Path $context.BundlePath "_internal\frontend\dist\index.html"),
+        $context.EnvironmentReport,
+        $context.PeReport,
+        $context.QtReport,
+        $context.SourceSmokeReport,
+        $context.FrozenSmokeReport,
+        (Join-Path $context.WorkPath "warn-Virelo.txt"),
+        (Join-Path $context.WorkPath "xref-Virelo.html"),
+        (Join-Path $context.WorkPath "Analysis-00.toc"),
+        (Join-Path $context.WorkPath "COLLECT-00.toc"),
+        $context.PyInstallerLog,
+        $installerPath,
+        $installerOutputManifestPath,
+        $installerEvidencePath,
+        $innoLogPath,
+        $innoVersionProbeLogPath,
+        (Join-Path $context.BuildRoot "installer-bootstrap-pe.json")
+    )
+    foreach ($required in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Required release evidence is missing: $required."
+        }
+    }
+    Assert-VireloFileVersion `
+        -Path (Join-Path $context.BundlePath "Virelo.exe") `
+        -ExpectedVersion $version
+    Assert-VireloFileVersion -Path $installerPath -ExpectedVersion $version
+
+    $installerEvidence = Get-Content -LiteralPath $installerEvidencePath -Raw | ConvertFrom-Json
+    $expectedAllowed = if ($context.Architecture -eq "x64") { "x64compatible" } else { "arm64" }
+    $expectedMinVersion = if ($context.Architecture -eq "x64") { "10.0.17763" } else { "10.0.22000" }
+    $expectedCompilerIdentity = "Inno Setup 6 Command-Line Compiler"
+    $expectedCompilerVersion = "6.7.3"
+    if ([int] $installerEvidence.schemaVersion -lt 4 -or
+        $installerEvidence.architecture -ne $context.Architecture -or
+        $installerEvidence.architecturesAllowed -ne $expectedAllowed -or
+        $installerEvidence.architecturesInstallIn64BitMode -ne $expectedAllowed -or
+        $installerEvidence.compilerIdentity -ne $expectedCompilerIdentity -or
+        $installerEvidence.compilerVersion -ne $expectedCompilerVersion -or
+        [string]::IsNullOrWhiteSpace([string] $installerEvidence.compilerPath) -or
+        $installerEvidence.compilerSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $installerEvidence.minVersion -ne $expectedMinVersion -or
+        -not (Test-VireloPathEquals $installerEvidence.payloadPath $context.BundlePath) -or
+        $installerEvidence.installerPath -ne $installerPath -or
+        $installerEvidence.outputManifestPath -ne $installerOutputManifestPath -or
+        $installerEvidence.payloadFingerprint -ne $manifest.payloadFingerprint) {
+        throw "Installer evidence does not match the architecture-qualified payload."
+    }
+    $innoVersionProbeTranscript = Get-Content -LiteralPath $innoVersionProbeLogPath -Raw
+    if ($innoVersionProbeTranscript -notmatch
+        '(?m)^Inno Setup 6 Command-Line Compiler\r?$' -or
+        $innoVersionProbeTranscript -notmatch
+        '(?m)^Compiler engine version:\s+Inno Setup 6\.7\.3\r?$') {
+        throw "The recorded Inno Setup compiler probe does not identify the required 6.7.3 compiler."
+    }
+    $payloadManifestHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
+    if ($installerEvidence.payloadManifestSha256 -ne $payloadManifestHash) {
+        throw "The payload manifest changed after the installer was compiled."
+    }
+    $installerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath).Hash.ToLowerInvariant()
+    if ($installerEvidence.installerSha256 -ne $installerHash) {
+        throw "The installer changed after it was associated with the verified payload."
+    }
+    $installerOutputManifestHash = (
+        Get-FileHash -Algorithm SHA256 -LiteralPath $installerOutputManifestPath
+    ).Hash.ToLowerInvariant()
+    if ($installerEvidence.outputManifestSha256 -ne $installerOutputManifestHash) {
+        throw "The compiler-generated installer payload manifest changed after compilation."
+    }
+
+    # Inno Setup's OutputManifestFile is compiler-generated evidence of every file
+    # embedded in Setup. Require exact path, size, and hash agreement with the
+    # architecture-qualified bundle so a mislabeled or stale payload cannot pass.
+    $outputManifestRows = @(
+        Get-Content -LiteralPath $installerOutputManifestPath |
+            ConvertFrom-Csv -Delimiter "`t"
+    )
+    $payloadFiles = @(Get-ChildItem -LiteralPath $context.BundlePath -Recurse -File)
+    if ($outputManifestRows.Count -ne $payloadFiles.Count -or $outputManifestRows.Count -eq 0) {
+        throw "The installer output manifest file count does not match the verified payload."
+    }
+    $bundleRoot = [IO.Path]::GetFullPath($context.BundlePath).TrimEnd([char[]] @('\', '/'))
+    $bundlePrefix = $bundleRoot + [IO.Path]::DirectorySeparatorChar
+    $manifestFiles = @{}
+    foreach ($row in $outputManifestRows) {
+        $sourcePath = [IO.Path]::GetFullPath([string] $row.SourceFilename)
+        if (-not $sourcePath.StartsWith($bundlePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The installer embeds a file outside dist/$($context.Architecture)/Virelo: $sourcePath."
+        }
+        $relative = $sourcePath.Substring($bundlePrefix.Length).Replace('\', '/')
+        if ($manifestFiles.ContainsKey($relative)) {
+            throw "The installer output manifest contains a duplicate payload file: $relative."
+        }
+        $manifestFiles[$relative] = $row
+    }
+    foreach ($file in $payloadFiles) {
+        $relative = $file.FullName.Substring($bundlePrefix.Length).Replace('\', '/')
+        if (-not $manifestFiles.ContainsKey($relative)) {
+            throw "The installer output manifest omits payload file: $relative."
+        }
+        $row = $manifestFiles[$relative]
+        if ([long] $row.OriginalSize -ne $file.Length) {
+            throw "The installer output manifest size differs for payload file: $relative."
+        }
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+        if ([string] $row.SHA256Sum -ne $actualHash) {
+            throw "The installer output manifest hash differs for payload file: $relative."
+        }
+    }
+
+    $innoLines = @(Get-Content -LiteralPath $innoLogPath)
+    $innoTranscript = $innoLines -join [Environment]::NewLine
+    $innoWarnings = @(
+        $innoLines | Where-Object {
+            $_ -match '(?i)\bwarning(?:s|\(s\))?\b' -and
+            $_ -notmatch '(?i)\b0\s+warning(?:s|\(s\))?\b'
+        }
+    )
+    if ($innoWarnings.Count -gt 0) {
+        throw "Inno Setup emitted unclassified warning text: $($innoWarnings -join ' | ')."
+    }
+    $effectiveMarkers = @(
+        "VIRELO_EFFECTIVE_ARCHITECTURE=$($context.Architecture)",
+        "VIRELO_EFFECTIVE_ALLOWED=$expectedAllowed",
+        "VIRELO_EFFECTIVE_64BIT_MODE=$expectedAllowed",
+        "VIRELO_EFFECTIVE_MIN_VERSION=$expectedMinVersion"
+    )
+    foreach ($marker in $effectiveMarkers) {
+        if ($innoTranscript -notmatch [regex]::Escape($marker)) {
+            throw "The Inno transcript lacks the expected effective configuration marker: $marker."
+        }
+    }
+    $expectedPayloadMarker = 'VIRELO_EFFECTIVE_PAYLOAD=.*[\\/]dist[\\/]' +
+    [regex]::Escape($context.Architecture) + '[\\/]Virelo'
+    if ($innoTranscript -notmatch $expectedPayloadMarker) {
+        throw "The Inno transcript does not prove the architecture-qualified payload path."
+    }
+    $environmentHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $context.EnvironmentReport).Hash.ToLowerInvariant()
+    if ($manifest.environmentReportSha256 -ne $environmentHash) {
+        throw "The recorded Python dependency/ABI preflight evidence changed after packaging."
+    }
+
+    $sourceSmoke = Get-Content -LiteralPath $context.SourceSmokeReport -Raw | ConvertFrom-Json
+    $frozenSmoke = Get-Content -LiteralPath $context.FrozenSmokeReport -Raw | ConvertFrom-Json
+    Assert-VireloSmokeReport `
+        -Report $sourceSmoke `
+        -ReportPath $context.SourceSmokeReport `
+        -ExpectedArchitecture $context.Architecture `
+        -ExpectedVersion $version `
+        -ExpectedFrozen $false
+    Assert-VireloSmokeReport `
+        -Report $frozenSmoke `
+        -ReportPath $context.FrozenSmokeReport `
+        -ExpectedArchitecture $context.Architecture `
+        -ExpectedVersion $version `
+        -ExpectedFrozen $true
+
+    $iss = Get-Content -LiteralPath "installer\virelo.iss" -Raw
+    if ($context.Architecture -eq "x64") {
+        if ($iss -notmatch 'PayloadArchitecturesAllowed\s+"x64compatible"' -or
+            $iss -notmatch 'PayloadArchitecturesInstallIn64BitMode\s+"x64compatible"') {
+            throw "The x64 installer is not configured for Windows 11 ARM64 x64 emulation."
+        }
+    }
+    else {
+        if ($iss -notmatch 'PayloadArchitecturesAllowed\s+"arm64"' -or
+            $iss -notmatch 'PayloadArchitecturesInstallIn64BitMode\s+"arm64"') {
+            throw "The ARM64 installer is not restricted to an ARM64 operating system."
+        }
+    }
+    if ($iss -notmatch '\.\.\\dist\\" \+ PayloadArchitecture \+ "\\Virelo') {
+        throw "The installer does not derive its source from the architecture-qualified payload directory."
+    }
+
+    $savedEnvironment = Start-VireloSanitizedEnvironment -PythonExecutable $context.Python
+    try {
+        Invoke-VireloPreflight `
+            -Context $context `
+            -Mode full `
+            -ReportPath (Join-Path $context.BuildRoot "preflight-verify.json")
+
+        $pythonPrefix = (& $context.Python -I -c "import sys; print(sys.prefix)" | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python failed while resolving sys.prefix for PyInstaller provenance verification."
+        }
+        $pythonBasePrefix = (& $context.Python -I -c "import sys; print(sys.base_prefix)" | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw "Python failed while resolving sys.base_prefix for PyInstaller provenance verification."
+        }
+        & $context.Python scripts\audit_pyinstaller.py `
+            --architecture $context.Architecture `
+            --build-dir $context.WorkPath `
+            --bundle $context.BundlePath `
+            --python-prefix $pythonPrefix `
+            --python-base-prefix $pythonBasePrefix `
+            --transcript $context.PyInstallerLog `
+            --report (Join-Path $context.BuildRoot "pyinstaller-audit.json")
+        if ($LASTEXITCODE -ne 0) {
+            throw "PyInstaller warning, provenance, or table-of-contents verification failed."
+        }
+
+        & $context.Python scripts\verify_qt_deployment.py `
+            --architecture $context.Architecture `
+            --bundle $context.BundlePath `
+            --report $context.QtReport
+        if ($LASTEXITCODE -ne 0) {
+            throw "Qt deployment verification failed."
+        }
+
+        & $context.Python scripts\pe_arch.py `
+            --expected $context.Architecture `
+            --recursive `
+            --json $context.PeReport `
+            $context.BundlePath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Payload PE verification failed."
+        }
+
+        # Rerun the windowed frozen executable. The JSON report makes failures
+        # visible even though the PyInstaller executable has no console.
+        Remove-Item -LiteralPath $context.FrozenSmokeReport -Force
+        $frozenExe = Join-Path $context.BundlePath "Virelo.exe"
+        $frozenSmokeExitCode = Invoke-VireloBoundedProcess `
+            -FilePath $frozenExe `
+            -ArgumentList @("--smoke-test", "--smoke-report", "`"$($context.FrozenSmokeReport)`"") `
+            -TimeoutSeconds 120 `
+            -Hidden
+        if ($frozenSmokeExitCode -ne 0 -or
+            -not (Test-Path -LiteralPath $context.FrozenSmokeReport -PathType Leaf)) {
+            throw "The frozen executable failed its release-verification smoke test."
+        }
+        $rerunSmoke = Get-Content -LiteralPath $context.FrozenSmokeReport -Raw | ConvertFrom-Json
+        Assert-VireloSmokeReport `
+            -Report $rerunSmoke `
+            -ReportPath $context.FrozenSmokeReport `
+            -ExpectedArchitecture $context.Architecture `
+            -ExpectedVersion $version `
+            -ExpectedFrozen $true
+    }
+    finally {
+        Restore-VireloEnvironment $savedEnvironment
+    }
+}
+finally {
+    Pop-Location
 }
 
-Write-Host ""
-Write-Host "[verify-release] PASSED: All artifacts verified" -ForegroundColor Green
+Write-Host "[verify-release] PASSED: $installerPath is tied to a verified $($context.Architecture) payload." -ForegroundColor Green
