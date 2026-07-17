@@ -12,6 +12,8 @@ LOG = logging.getLogger("Virelo")
 
 
 class KeyCaptureSession:
+    """Capture one global key press with cancellation and timeout support."""
+
     def __init__(self, keyboard, cancel_key="esc", timeout_s=15.0, poll_interval=0.01):
         self._keyboard = keyboard
         self._cancel_key = cancel_key
@@ -22,17 +24,19 @@ class KeyCaptureSession:
         self._result = None
         self._reason = None
 
-    def stop(self):
+    def stop(self) -> None:
+        """Stop the session and wake its wait loop."""
         if self._reason is None:
             self._reason = "stopped"
         self._stop.set()
         self._done.set()
 
     def run(self):
+        """Run the capture session and return the captured key and stop reason."""
         self._result = None
         self._reason = None
         # Honor a stop requested before the session actually started running
-        # (for example a quit issued right after capture began). Do NOT clear
+        # (for example, a quit issued right after capture began). Do not clear
         # the stop/done events here or that request would be lost, leaving a
         # global keyboard hook installed after teardown.
         if self._stop.is_set():
@@ -52,7 +56,7 @@ class KeyCaptureSession:
                     break
                 self._done.wait(self._poll_interval)
         except Exception:
-            LOG.exception("Key capture hook failed")
+            LOG.exception("The key capture hook failed.")
             self._reason = "error"
         finally:
             if hook_id is not None:
@@ -83,16 +87,18 @@ class KeyCaptureSession:
         self._done.set()
 
 
-# Conditional PySide6 import for CI compatibility (D-10)
+# Import PySide6 conditionally for CI compatibility under D-10.
 try:
     from PySide6 import QtCore
-except Exception:  # pragma: no cover - PySide6 unavailable in some test envs
+except ImportError:  # pragma: no cover - PySide6 is unavailable in some test environments.
     QtCore = None
 
 
 if QtCore is not None:
 
     class KeyCaptureWorker(QtCore.QObject):
+        """Expose a key-capture session through Qt signals for a worker thread."""
+
         captured = QtCore.Signal(str)
         cancelled = QtCore.Signal(str)
         finished = QtCore.Signal()
@@ -109,7 +115,8 @@ if QtCore is not None:
 
         @QtCore.Slot()
         def run(self):
-            # finished must ALWAYS emit or the CaptureGuard stays locked and
+            """Run the session and always emit ``finished`` during teardown."""
+            # ``finished`` must always emit or the CaptureGuard stays locked and
             # the capture QThread never quits.
             try:
                 key, reason = self._session.run()
@@ -118,10 +125,11 @@ if QtCore is not None:
                 else:
                     self.cancelled.emit(reason)
             except Exception:
-                LOG.exception("Key capture session crashed")
+                LOG.exception("The key capture session crashed.")
                 self.cancelled.emit("error")
             finally:
                 self.finished.emit()
 
-        def stop(self):
+        def stop(self) -> None:
+            """Request that the capture session stop."""
             self._session.stop()

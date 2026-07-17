@@ -6,17 +6,22 @@ import React from "react";
 import { useTokens } from "./theme.jsx";
 import { Icon } from "./icons.jsx";
 
+const RowControlContext = React.createContext(null);
+
 function Toggle({ on, onChange, size = "md" }) {
   const t = useTokens();
-  const W = size === "sm" ? 26 : 32;
-  const H = size === "sm" ? 15 : 18;
-  const K = H - 4;
+  const row = React.useContext(RowControlContext);
+  const trackWidth = size === "sm" ? 26 : 32;
+  const trackHeight = size === "sm" ? 15 : 18;
+  const knobSize = trackHeight - 4;
   return (
     <button
       role="switch"
       aria-checked={!!on}
-      onClick={(e) => {
-        e.stopPropagation();
+      aria-labelledby={row?.labelId}
+      aria-describedby={row?.descriptionId}
+      onClick={(event) => {
+        event.stopPropagation();
         onChange(!on);
       }}
       style={{
@@ -30,9 +35,9 @@ function Toggle({ on, onChange, size = "md" }) {
       <span
         style={{
           display: "block",
-          width: W,
-          height: H,
-          borderRadius: H / 2,
+          width: trackWidth,
+          height: trackHeight,
+          borderRadius: trackHeight / 2,
           background: on
             ? t.accent
             : t.isDark
@@ -46,10 +51,10 @@ function Toggle({ on, onChange, size = "md" }) {
           style={{
             position: "absolute",
             top: 2,
-            left: on ? W - K - 2 : 2,
-            width: K,
-            height: K,
-            borderRadius: K / 2,
+            left: on ? trackWidth - knobSize - 2 : 2,
+            width: knobSize,
+            height: knobSize,
+            borderRadius: knobSize / 2,
             background: "#fff",
             transition: "left .18s cubic-bezier(.2,.7,.3,1)",
             boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
@@ -68,6 +73,7 @@ function Button({
   icon,
   kbd,
   disabled,
+  ...buttonProps
 }) {
   const t = useTokens();
   const [hover, setHover] = React.useState(false);
@@ -92,25 +98,27 @@ function Button({
     },
     danger: {
       bg: "transparent",
-      color: "#C54A3A",
+      color: t.dangerText,
       border: t.borderHi,
       hover: "rgba(197,74,58,0.08)",
     },
   };
-  const v = variants[variant];
-  const H = size === "sm" ? 26 : 32;
+  const variantStyle = variants[variant];
+  const buttonHeight = size === "sm" ? 26 : 32;
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={disabled}
+      {...buttonProps}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
-        height: H,
+        height: buttonHeight,
         padding: size === "sm" ? "0 10px" : "0 14px",
-        background: hover && !disabled ? v.hover : v.bg,
-        color: v.color,
-        border: `1px solid ${v.border === "transparent" ? "transparent" : v.border}`,
+        background: hover && !disabled ? variantStyle.hover : variantStyle.bg,
+        color: variantStyle.color,
+        border: `1px solid ${variantStyle.border}`,
         borderRadius: t.radius,
         fontSize: size === "sm" ? 12 : 13,
         fontWeight: 500,
@@ -165,8 +173,9 @@ function Card({ title, subtitle, children, footer, padding = true }) {
           }}
         >
           {title && (
-            <div
+            <h2
               style={{
+                margin: 0,
                 fontSize: 13,
                 fontWeight: 600,
                 color: t.text,
@@ -174,7 +183,7 @@ function Card({ title, subtitle, children, footer, padding = true }) {
               }}
             >
               {title}
-            </div>
+            </h2>
           )}
           {subtitle && (
             <div style={{ fontSize: 12, color: t.textDim, marginTop: 2 }}>
@@ -203,6 +212,8 @@ function Card({ title, subtitle, children, footer, padding = true }) {
 
 function Row({ label, description, children, last }) {
   const t = useTokens();
+  const labelId = React.useId();
+  const descriptionId = React.useId();
   return (
     <div
       style={{
@@ -214,11 +225,15 @@ function Row({ label, description, children, last }) {
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13.5, fontWeight: 500, color: t.text }}>
+        <div
+          id={labelId}
+          style={{ fontSize: 13.5, fontWeight: 500, color: t.text }}
+        >
           {label}
         </div>
         {description && (
           <div
+            id={descriptionId}
             style={{
               fontSize: 12.5,
               color: t.textDim,
@@ -230,15 +245,27 @@ function Row({ label, description, children, last }) {
           </div>
         )}
       </div>
-      <div style={{ flexShrink: 0 }}>{children}</div>
+      <RowControlContext.Provider
+        value={{
+          labelId,
+          label,
+          descriptionId: description ? descriptionId : undefined,
+        }}
+      >
+        <div style={{ flexShrink: 0 }}>{children}</div>
+      </RowControlContext.Provider>
     </div>
   );
 }
 
 function Segmented({ options, value, onChange, mono }) {
   const t = useTokens();
+  const row = React.useContext(RowControlContext);
   return (
     <div
+      role="group"
+      aria-labelledby={row?.labelId}
+      aria-describedby={row?.descriptionId}
       style={{
         display: "inline-flex",
         background: t.isDark ? "rgba(255,255,255,0.04)" : "#EDEAE3",
@@ -254,6 +281,7 @@ function Segmented({ options, value, onChange, mono }) {
         return (
           <button
             key={val}
+            aria-pressed={active}
             onClick={() => onChange(val)}
             style={{
               height: 24,
@@ -283,7 +311,7 @@ function Segmented({ options, value, onChange, mono }) {
   );
 }
 
-function stepBtn(t) {
+function stepButtonStyle(t) {
   return {
     width: 26,
     height: "100%",
@@ -298,8 +326,12 @@ function stepBtn(t) {
 
 function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
   const t = useTokens();
+  const row = React.useContext(RowControlContext);
   return (
     <div
+      role="group"
+      aria-labelledby={row?.labelId}
+      aria-describedby={row?.descriptionId}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -311,8 +343,9 @@ function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
       }}
     >
       <button
+        aria-label={`Decrease ${row?.label || "value"}`}
         onClick={() => onChange(Math.max(min, value - step))}
-        style={stepBtn(t)}
+        style={stepButtonStyle(t)}
       >
         {"−"}
       </button>
@@ -340,8 +373,9 @@ function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
         )}
       </div>
       <button
+        aria-label={`Increase ${row?.label || "value"}`}
         onClick={() => onChange(Math.min(max, value + step))}
-        style={stepBtn(t)}
+        style={stepButtonStyle(t)}
       >
         +
       </button>
@@ -351,48 +385,71 @@ function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
 
 function Slider({ value, onChange, min = 0, max = 100 }) {
   const t = useTokens();
-  const pct = ((value - min) / (max - min)) * 100;
-  const ref = React.useRef(null);
-  const start = (e) => {
-    const rect = ref.current.getBoundingClientRect();
-    const set = (x) =>
-      onChange(
-        Math.round(
-          min +
-            Math.max(0, Math.min(1, (x - rect.left) / rect.width)) *
-              (max - min),
-        ),
-      );
-    set(e.clientX);
-    const mv = (ev) => set(ev.clientX);
-    const up = () => {
-      document.removeEventListener("pointermove", mv);
-      document.removeEventListener("pointerup", up);
-    };
-    document.addEventListener("pointermove", mv);
-    document.addEventListener("pointerup", up);
+  const row = React.useContext(RowControlContext);
+  const percentage = ((value - min) / (max - min)) * 100;
+  const sliderRef = React.useRef(null);
+  const activePointer = React.useRef(null);
+  const updateFromPointer = (event) => {
+    const rect = sliderRef.current.getBoundingClientRect();
+    onChange(
+      Math.round(
+        min +
+          Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) *
+            (max - min),
+      ),
+    );
   };
-  const clamp = (v) => Math.max(min, Math.min(max, v));
-  const onKeyDown = (e) => {
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
+  const onPointerDown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    activePointer.current = event.pointerId;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    updateFromPointer(event);
+  };
+  const onPointerMove = (event) => {
+    if (activePointer.current === event.pointerId) updateFromPointer(event);
+  };
+  const finishPointer = (event) => {
+    if (activePointer.current !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    activePointer.current = null;
+  };
+  const clamp = (nextValue) => Math.max(min, Math.min(max, nextValue));
+  const onKeyDown = (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowDown") {
+      event.preventDefault();
       onChange(clamp(value - 1));
     }
-    if (e.key === "ArrowRight") {
-      e.preventDefault();
+    if (event.key === "ArrowRight" || event.key === "ArrowUp") {
+      event.preventDefault();
       onChange(clamp(value + 1));
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      onChange(min);
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      onChange(max);
     }
   };
   return (
     <div
-      ref={ref}
+      ref={sliderRef}
       role="slider"
       aria-valuemin={min}
       aria-valuemax={max}
       aria-valuenow={value}
+      aria-labelledby={row?.labelId}
+      aria-describedby={row?.descriptionId}
       tabIndex={0}
       onKeyDown={onKeyDown}
-      onPointerDown={start}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={finishPointer}
+      onPointerCancel={finishPointer}
       style={{
         position: "relative",
         height: 20,
@@ -417,7 +474,7 @@ function Slider({ value, onChange, min = 0, max = 100 }) {
           style={{
             position: "absolute",
             inset: 0,
-            width: `${pct}%`,
+            width: `${percentage}%`,
             background: t.accent,
             borderRadius: 2,
           }}
@@ -426,7 +483,7 @@ function Slider({ value, onChange, min = 0, max = 100 }) {
       <div
         style={{
           position: "absolute",
-          left: `calc(${pct}% - 8px)`,
+          left: `calc(${percentage}% - 8px)`,
           width: 16,
           height: 16,
           borderRadius: 8,
@@ -480,15 +537,15 @@ function Badge({ children, tone = "default" }) {
       color: t.isDark ? "#FFC77A" : "#8B6518",
     },
   };
-  const v = tones[tone];
+  const toneStyle = tones[tone];
   return (
     <span
       style={{
         fontSize: 10.5,
         padding: "2px 7px",
         borderRadius: t.radius - 1,
-        background: v.bg,
-        color: v.color,
+        background: toneStyle.bg,
+        color: toneStyle.color,
         fontWeight: 600,
         letterSpacing: 0.2,
         display: "inline-block",

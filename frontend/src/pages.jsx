@@ -40,60 +40,153 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.`;
 
-function KeyCapture({ value, target, bridge }) {
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function useModalFocus(open, onClose) {
+  const dialogRef = React.useRef(null);
+  const returnFocusRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (!open) return undefined;
+    returnFocusRef.current = document.activeElement;
+    const dialog = dialogRef.current;
+    const focusable = () =>
+      Array.from(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || []);
+    (focusable()[0] || dialog)?.focus();
+
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        dialog?.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      const previous = returnFocusRef.current;
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [onClose, open]);
+
+  return dialogRef;
+}
+
+function KeyCapture({
+  label,
+  value,
+  target,
+  bridge,
+  captureActive,
+  setCaptureActive,
+  showStatus,
+}) {
   const t = useTokens();
   const [capturing, setCapturing] = React.useState(false);
   const btnRef = React.useRef(null);
+  const capturingRef = React.useRef(false);
+
+  React.useEffect(() => {
+    capturingRef.current = capturing;
+  }, [capturing]);
+
+  React.useEffect(
+    () => () => {
+      if (capturingRef.current) {
+        setCaptureActive?.(false);
+        bridge.cancel_capture?.(() => {});
+      }
+    },
+    [bridge, setCaptureActive],
+  );
+
+  React.useEffect(() => {
+    const onStatus = (status) => {
+      if (status === "done" || status === "cancelled" || status === "timeout") {
+        setCapturing(false);
+        setCaptureActive?.(false);
+      }
+    };
+    bridge.capture_status.connect(onStatus);
+    return () => bridge.capture_status.disconnect(onStatus);
+  }, [bridge, setCaptureActive]);
 
   React.useEffect(() => {
     if (!capturing) return;
     // Tell the backend to release its global keyboard hook. Without this,
     // dismissing the capture UI leaves the hook active and the next key
     // pressed in any application is captured as the new binding.
-    const cancelBackend = () => {
+    const cancelCapture = () => {
       if (bridge.cancel_capture) bridge.cancel_capture(() => {});
+      setCapturing(false);
+      setCaptureActive?.(false);
     };
-    const onStatus = (status) => {
-      if (status === "done" || status === "cancelled" || status === "timeout") {
-        setCapturing(false);
-      }
-    };
-    bridge.capture_status.connect(onStatus);
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        cancelBackend();
-        setCapturing(false);
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelCapture();
       }
     };
     window.addEventListener("keydown", onKey);
-    const onMouseDown = (e) => {
-      if (btnRef.current && !btnRef.current.contains(e.target)) {
-        cancelBackend();
-        setCapturing(false);
+    const onMouseDown = (event) => {
+      if (btnRef.current && !btnRef.current.contains(event.target)) {
+        cancelCapture();
       }
     };
     const timer = setTimeout(() => {
       document.addEventListener("mousedown", onMouseDown);
     }, 50);
     return () => {
-      bridge.capture_status.disconnect(onStatus);
       window.removeEventListener("keydown", onKey);
       document.removeEventListener("mousedown", onMouseDown);
       clearTimeout(timer);
     };
-  }, [capturing, bridge]);
+  }, [capturing, bridge, setCaptureActive]);
 
   const handleClick = () => {
-    if (capturing) return;
+    if (capturing || captureActive) return;
     setCapturing(true);
-    bridge.capture_key(target, () => {});
+    setCaptureActive?.(true);
+    bridge.capture_key(target, (result) => {
+      try {
+        const response = JSON.parse(result);
+        if (!response.ok) {
+          setCapturing(false);
+          setCaptureActive?.(false);
+          showStatus?.(response.error || "Key capture could not start.", 3000);
+        }
+      } catch (error) {
+        console.error("[capture] Failed to parse capture response:", error);
+        setCapturing(false);
+        setCaptureActive?.(false);
+        showStatus?.("Key capture could not start.", 3000);
+      }
+    });
   };
 
   return (
     <button
       ref={btnRef}
+      aria-label={`${label}: ${capturing ? "Press a key" : value}`}
       onClick={handleClick}
+      disabled={captureActive && !capturing}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -109,7 +202,8 @@ function KeyCapture({ value, target, bridge }) {
         fontWeight: 600,
         letterSpacing: 0.3,
         fontFamily: t.mono,
-        cursor: "pointer",
+        cursor: captureActive && !capturing ? "not-allowed" : "pointer",
+        opacity: captureActive && !capturing ? 0.55 : 1,
         boxShadow: t.isDark ? "none" : "0 1px 0 rgba(0,0,0,0.04)",
         transition: "border-color .15s, color .15s",
       }}
@@ -121,15 +215,15 @@ function KeyCapture({ value, target, bridge }) {
 
 function MonitorPreview({ width, height }) {
   const t = useTokens();
-  const mW = 280,
-    mH = 170,
-    pad = 12;
-  const iw = mW - pad * 2,
-    ih = mH - pad * 2;
-  const wW = (iw * width) / 100,
-    wH = (ih * height) / 100;
-  const wX = pad + (iw - wW) / 2,
-    wY = pad + (ih - wH) / 2;
+  const monitorWidth = 280;
+  const monitorHeight = 170;
+  const monitorPadding = 12;
+  const innerWidth = monitorWidth - monitorPadding * 2;
+  const innerHeight = monitorHeight - monitorPadding * 2;
+  const windowWidth = (innerWidth * width) / 100;
+  const windowHeight = (innerHeight * height) / 100;
+  const windowLeft = monitorPadding + (innerWidth - windowWidth) / 2;
+  const windowTop = monitorPadding + (innerHeight - windowHeight) / 2;
 
   // If the UI accent is too dark in light mode (slate), fall back to a sky
   // blue so the rect stays visible against the dark monitor. Otherwise use
@@ -139,7 +233,6 @@ function MonitorPreview({ width, height }) {
   const rectColor =
     !t.isDark && darkAccents.includes(tweaks.accent) ? "#8EC4FF" : t.accent;
   const monitorBg = t.isDark ? "#0C0C0E" : "#3B3833";
-  const labelOutside = true; // always above the monitor — more consistent
 
   return (
     <div
@@ -169,8 +262,8 @@ function MonitorPreview({ width, height }) {
         </div>
         <div
           style={{
-            width: mW,
-            height: mH,
+            width: monitorWidth,
+            height: monitorHeight,
             borderRadius: 6,
             background: monitorBg,
             border: `1px solid ${t.borderHi}`,
@@ -180,8 +273,8 @@ function MonitorPreview({ width, height }) {
           }}
         >
           <svg
-            width={mW}
-            height={mH}
+            width={monitorWidth}
+            height={monitorHeight}
             style={{
               position: "absolute",
               inset: 0,
@@ -204,16 +297,20 @@ function MonitorPreview({ width, height }) {
                 />
               </pattern>
             </defs>
-            <rect width={mW} height={mH} fill="url(#mp-grid)" />
+            <rect
+              width={monitorWidth}
+              height={monitorHeight}
+              fill="url(#mp-grid)"
+            />
           </svg>
 
           <div
             style={{
               position: "absolute",
-              left: wX,
-              top: wY,
-              width: wW,
-              height: wH,
+              left: windowLeft,
+              top: windowTop,
+              width: windowWidth,
+              height: windowHeight,
               background: `${rectColor}33`,
               border: `1.5px solid ${rectColor}`,
               borderRadius: 3,
@@ -221,7 +318,7 @@ function MonitorPreview({ width, height }) {
               boxShadow: `0 0 16px ${rectColor}30`,
             }}
           >
-            {wH >= 22 && (
+            {windowHeight >= 22 && (
               <div
                 style={{
                   height: 10,
@@ -290,13 +387,25 @@ function SnapPage({ app }) {
         subtitle="Press the key button to rebind. Tap the bound key repeatedly to trigger."
       >
         <Row label="Snap key">
-          <KeyCapture value={app.snapKey} target="snap" bridge={app.bridge} />
+          <KeyCapture
+            label="Snap key"
+            value={app.snapKey}
+            target="snap"
+            bridge={app.bridge}
+            captureActive={app.captureActive}
+            setCaptureActive={app.setCaptureActive}
+            showStatus={app.showStatus}
+          />
         </Row>
         <Row label="Restore key">
           <KeyCapture
+            label="Restore key"
             value={app.restoreKey}
             target="restore"
             bridge={app.bridge}
+            captureActive={app.captureActive}
+            setCaptureActive={app.setCaptureActive}
+            showStatus={app.showStatus}
           />
         </Row>
         <Row
@@ -387,18 +496,19 @@ function ExplorerPage({ app }) {
   const t = useTokens();
   const [confirmAction, setConfirmAction] = React.useState(null);
   const [busy, setBusy] = React.useState(null);
+  const closeConfirm = React.useCallback(() => setConfirmAction(null), []);
+  const confirmDialogRef = useModalFocus(Boolean(confirmAction), closeConfirm);
 
   React.useEffect(() => {
-    if (!confirmAction) return;
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setConfirmAction(null);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [confirmAction]);
+    const onViewsStatus = () => setBusy(null);
+    app.bridge.views_status?.connect(onViewsStatus);
+    return () => app.bridge.views_status?.disconnect?.(onViewsStatus);
+  }, [app.bridge]);
+
+  React.useEffect(() => {
+    app.setModalOpen?.(Boolean(confirmAction));
+    return () => app.setModalOpen?.(false);
+  }, [app.setModalOpen, confirmAction]);
 
   const runViewsAction = (action) => {
     setConfirmAction(null);
@@ -416,10 +526,6 @@ function ExplorerPage({ app }) {
     }
     setBusy(action);
     const onResult = (result) => {
-      // The bridge callback only acknowledges that the background task has
-      // started. The real success or failure message arrives later through
-      // the views_status signal, which app.jsx routes to the footer status.
-      setBusy(null);
       try {
         const r = JSON.parse(result);
         if (r.ok) {
@@ -430,10 +536,12 @@ function ExplorerPage({ app }) {
             0,
           );
         } else {
+          setBusy(null);
           app.showStatus?.(r.error || "Folder view update failed.", 5000);
         }
-      } catch (e) {
-        console.error("[explorer] Failed to parse folder view result:", e);
+      } catch (error) {
+        setBusy(null);
+        console.error("[explorer] Failed to parse folder view result:", error);
         app.showStatus?.("Folder view update failed.", 5000);
       }
     };
@@ -444,13 +552,13 @@ function ExplorerPage({ app }) {
     confirmAction === "apply"
       ? {
           title: "Make Details the default?",
-          body: "File Explorer will restart to apply the change. Open Explorer windows will close.",
+          body: "File Explorer will restart to apply the change. Finish any file copies, moves, or deletions first; open Explorer windows will close.",
           confirmLabel: "Apply and restart Explorer",
           confirmVariant: "primary",
         }
       : {
           title: "Reset folder views?",
-          body: "This restores the Windows default view for every folder. File Explorer will restart and open Explorer windows will close.",
+          body: "This restores the Windows default view for every folder. Finish any file copies, moves, or deletions first; File Explorer will restart and open windows will close.",
           confirmLabel: "Reset and restart Explorer",
           confirmVariant: "danger",
         };
@@ -458,12 +566,12 @@ function ExplorerPage({ app }) {
   return (
     <Pg
       title="Explorer"
-      subtitle="Quality-of-life tweaks for File Explorer's Detail view."
+      subtitle="Quality-of-life tweaks for File Explorer's Details view."
     >
       <Card>
         <Row
           label="Auto-size columns on folder change"
-          description="Resize Detail view columns to fit each time you navigate."
+          description="Resize Details view columns to fit each time you navigate."
           last
         >
           <Toggle
@@ -511,7 +619,7 @@ function ExplorerPage({ app }) {
 
       {confirmAction && (
         <div
-          onClick={() => setConfirmAction(null)}
+          onClick={closeConfirm}
           style={{
             position: "fixed",
             inset: 0,
@@ -524,7 +632,13 @@ function ExplorerPage({ app }) {
           }}
         >
           <div
+            ref={confirmDialogRef}
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label={confirmCopy.title}
+            aria-describedby="explorer-view-confirm-description"
             style={{
               width: 360,
               background: t.surface,
@@ -546,6 +660,7 @@ function ExplorerPage({ app }) {
               {confirmCopy.title}
             </div>
             <div
+              id="explorer-view-confirm-description"
               style={{
                 fontSize: 13,
                 color: t.textDim,
@@ -558,10 +673,7 @@ function ExplorerPage({ app }) {
             <div
               style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
             >
-              <Button
-                variant="secondary"
-                onClick={() => setConfirmAction(null)}
-              >
+              <Button variant="secondary" onClick={closeConfirm}>
                 Cancel
               </Button>
               <Button
@@ -604,29 +716,47 @@ function ShortcutsPage({ app }) {
       subtitle="Global keyboard shortcuts registered by Virelo."
     >
       <Card padding={false}>
-        {items.map((it, i) => (
+        {items.map((item, index) => (
           <div
-            key={i}
+            key={item.label}
             style={{
               display: "flex",
               alignItems: "center",
+              flexWrap: "wrap",
+              rowGap: 8,
               padding: `${t.rowPad}px ${t.cardPad}px`,
               borderBottom:
-                i < items.length - 1 ? `1px solid ${t.border}` : "none",
+                index < items.length - 1 ? `1px solid ${t.border}` : "none",
             }}
           >
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, color: t.text }}>{it.label}</div>
-              {it.description && (
+            <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: t.text }}>{item.label}</div>
+              {item.description && (
                 <div style={{ fontSize: 11.5, color: t.textDim, marginTop: 2 }}>
-                  {it.description}
+                  {item.description}
                 </div>
               )}
             </div>
-            <div style={{ display: "flex", gap: 3, alignItems: "center" }}>
-              {it.hold && (
-                <>
-                  <Kbd>{it.hold}</Kbd>
+            <div
+              style={{
+                display: "flex",
+                flex: "1 1 260px",
+                flexWrap: "wrap",
+                gap: 3,
+                alignItems: "center",
+                justifyContent: "flex-end",
+                minWidth: 0,
+              }}
+            >
+              {item.hold && (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 3,
+                  }}
+                >
+                  <Kbd>{item.hold}</Kbd>
                   <span
                     style={{
                       color: t.textMuted,
@@ -637,32 +767,29 @@ function ShortcutsPage({ app }) {
                   >
                     (hold)
                   </span>
-                  <span
-                    style={{
-                      color: t.textMuted,
-                      fontSize: 11,
-                      margin: "0 1px",
-                    }}
-                  >
-                    +
-                  </span>
-                </>
+                </span>
               )}
-              {it.keys.map((k, j) => (
-                <React.Fragment key={j}>
-                  {j > 0 && (
+              {item.keys.map((key, keyIndex) => (
+                <span
+                  key={`${key}-${keyIndex}`}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 3,
+                  }}
+                >
+                  {(keyIndex > 0 || item.hold) && (
                     <span
                       style={{
                         color: t.textMuted,
                         fontSize: 11,
-                        margin: "0 1px",
                       }}
                     >
                       +
                     </span>
                   )}
-                  <Kbd>{k}</Kbd>
-                </React.Fragment>
+                  <Kbd>{key}</Kbd>
+                </span>
               ))}
             </div>
           </div>
@@ -675,18 +802,13 @@ function ShortcutsPage({ app }) {
 function GeneralPage({ app }) {
   const t = useTokens();
   const [confirmReset, setConfirmReset] = React.useState(false);
+  const closeReset = React.useCallback(() => setConfirmReset(false), []);
+  const resetDialogRef = useModalFocus(confirmReset, closeReset);
 
   React.useEffect(() => {
-    if (!confirmReset) return;
-    const onKey = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setConfirmReset(false);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [confirmReset]);
+    app.setModalOpen?.(confirmReset);
+    return () => app.setModalOpen?.(false);
+  }, [app.setModalOpen, confirmReset]);
 
   return (
     <Pg title="General" subtitle="Application-wide preferences.">
@@ -713,6 +835,8 @@ function GeneralPage({ app }) {
             {Object.entries(ACCENTS).map(([k, v]) => (
               <button
                 key={k}
+                aria-label={`${k[0].toUpperCase()}${k.slice(1)} accent`}
+                aria-pressed={app.accent === k}
                 onClick={() => app.set({ accent: k })}
                 style={{
                   width: 22,
@@ -751,11 +875,20 @@ function GeneralPage({ app }) {
         <Row
           label="Launch at login"
           description="Start Virelo when you sign in to Windows."
-          last
         >
           <Toggle
             on={app.launchLogin}
             onChange={(v) => app.set({ launchLogin: v })}
+          />
+        </Row>
+        <Row
+          label="Minimize to tray"
+          description="Keep Virelo running in the notification area when closed."
+          last
+        >
+          <Toggle
+            on={app.minimizeToTray}
+            onChange={(v) => app.set({ minimizeToTray: v })}
           />
         </Row>
       </Card>
@@ -778,7 +911,7 @@ function GeneralPage({ app }) {
 
       {confirmReset && (
         <div
-          onClick={() => setConfirmReset(false)}
+          onClick={closeReset}
           style={{
             position: "fixed",
             inset: 0,
@@ -791,7 +924,13 @@ function GeneralPage({ app }) {
           }}
         >
           <div
+            ref={resetDialogRef}
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Reset all settings"
+            aria-describedby="reset-settings-confirm-description"
             style={{
               width: 360,
               background: t.surface,
@@ -813,6 +952,7 @@ function GeneralPage({ app }) {
               Reset all settings?
             </div>
             <div
+              id="reset-settings-confirm-description"
               style={{
                 fontSize: 13,
                 color: t.textDim,
@@ -826,10 +966,7 @@ function GeneralPage({ app }) {
             <div
               style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
             >
-              <Button
-                variant="secondary"
-                onClick={() => setConfirmReset(false)}
-              >
+              <Button variant="secondary" onClick={closeReset}>
                 Cancel
               </Button>
               <Button
@@ -852,8 +989,9 @@ function GeneralPage({ app }) {
 function AboutPage() {
   const t = useTokens();
   const [showLicense, setShowLicense] = React.useState(false);
+  const licenseId = React.useId();
   return (
-    <Pg title="About" subtitle="Virelo -- a tiny utility for snappier windows.">
+    <Pg title="About" subtitle="Virelo, a tiny utility for snappier windows.">
       <Card padding={false}>
         <div
           style={{
@@ -903,12 +1041,15 @@ function AboutPage() {
             variant="ghost"
             size="sm"
             onClick={() => setShowLicense((v) => !v)}
+            aria-expanded={showLicense}
+            aria-controls={licenseId}
+            aria-label={`${showLicense ? "Hide" : "View"} MIT license`}
           >
             {showLicense ? "Hide" : "View"}
           </Button>
         </Row>
         {showLicense && (
-          <div style={{ padding: `${t.rowPad}px 0` }}>
+          <div id={licenseId} style={{ padding: `${t.rowPad}px 0` }}>
             <pre
               style={{
                 margin: 0,
@@ -934,8 +1075,9 @@ function Pg({ title, subtitle, children }) {
   return (
     <div>
       <div style={{ marginBottom: t.sectionGap + 6 }}>
-        <div
+        <h1
           style={{
+            margin: 0,
             fontSize: t.titleSize,
             fontWeight: 600,
             letterSpacing: -0.3,
@@ -943,7 +1085,7 @@ function Pg({ title, subtitle, children }) {
           }}
         >
           {title}
-        </div>
+        </h1>
         {subtitle && (
           <div
             style={{

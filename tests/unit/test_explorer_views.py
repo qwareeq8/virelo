@@ -1,7 +1,11 @@
 """Tests for the Explorer default-view plan builders (pure logic, no registry)."""
 
+import os
+import subprocess
 from datetime import datetime
+from types import SimpleNamespace
 
+from virelo.services import explorer_views
 from virelo.services.explorer_views import (
     BAGMRU_KEY,
     BAGS_KEY,
@@ -12,6 +16,9 @@ from virelo.services.explorer_views import (
     STREAMS_DEFAULTS_KEY,
     THIS_PC_GUID,
     VIEW_CACHE_KEYS,
+    _copy_key_tree,
+    _delete_key_tree,
+    _key_exists,
     backup_dir_name,
     this_pc_bag_values,
     top_view_values,
@@ -72,6 +79,291 @@ def test_this_pc_pidl_is_binary():
 
 
 def test_backup_dir_name_is_timestamped():
-    """Backup directories sort chronologically and are unique per second."""
-    name = backup_dir_name(datetime(2026, 7, 16, 13, 5, 9))
-    assert name == "view-backup-20260716-130509"
+    """Backup directories sort chronologically and are unique below one second."""
+    name = backup_dir_name(datetime(2026, 7, 16, 13, 5, 9, 123456))
+    assert name == "view-backup-20260716-130509-123456"
+
+
+def test_windows_utilities_resolve_from_system32(monkeypatch):
+    """Elevated registry and shell commands must not use PATH search."""
+    monkeypatch.setenv("SystemRoot", r"D:\TrustedWindows")
+
+    assert explorer_views._system32_executable("reg.exe") == os.path.join(
+        r"D:\TrustedWindows", "System32", "reg.exe"
+    )
+
+
+def test_folder_view_update_fails_before_registry_access_for_another_account(monkeypatch):
+    """Over-the-shoulder UAC must not write the administrator profile's HKCU."""
+    monkeypatch.setattr(explorer_views, "_current_process_owns_shell", lambda: False)
+    monkeypatch.setattr(
+        explorer_views,
+        "_open_winreg",
+        lambda: (_ for _ in ()).throw(AssertionError("registry was opened")),
+    )
+
+    result = explorer_views.apply_details_default()
+
+    assert not result["ok"]
+    assert "different Windows accounts" in result["error"]
+
+
+class _RegistryKey:
+    def __init__(self, path):
+        self.path = path
+
+    def Close(self):
+        """Match the subset of the winreg key protocol used by the deleter."""
+
+
+class _RegistryWithUndeletableChild:
+    KEY_ALL_ACCESS = 1
+    KEY_WOW64_64KEY = 2
+
+    def __init__(self):
+        self.enum_calls = 0
+
+    def OpenKey(self, root, path, reserved, access):
+        return _RegistryKey(path)
+
+    def EnumKey(self, key, index):
+        self.enum_calls += 1
+        if key.path == "parent" and index == 0:
+            return "child"
+        raise OSError(259, "No more data is available")
+
+    def DeleteKeyEx(self, root, path, access, reserved):
+        raise OSError("busy")
+
+
+def test_delete_key_tree_fails_once_instead_of_livelocking():
+    """An undeletable child should fail closed without repeating index zero."""
+    import pytest
+
+    registry = _RegistryWithUndeletableChild()
+
+    with pytest.raises(RuntimeError, match=r"HKCU\\parent\\child"):
+        _delete_key_tree(registry, object(), "parent")
+
+    assert registry.enum_calls == 3
+
+
+def test_delete_key_tree_does_not_treat_access_denied_as_missing():
+    """Access errors must abort rather than silently leave a partial tree."""
+    import pytest
+
+    registry = _RegistryWithUndeletableChild()
+    registry.OpenKey = lambda *args: (_ for _ in ()).throw(PermissionError("denied"))
+
+    with pytest.raises(PermissionError, match="denied"):
+        _delete_key_tree(registry, object(), "parent")
+
+
+def test_key_exists_does_not_treat_access_denied_as_missing():
+    """Backup checks must distinguish an unreadable key from an absent key."""
+    import pytest
+
+    registry = _RegistryWithUndeletableChild()
+    registry.HKEY_CURRENT_USER = object()
+    registry.KEY_READ = 4
+    registry.OpenKey = lambda *args: (_ for _ in ()).throw(PermissionError("denied"))
+
+    with pytest.raises(PermissionError, match="denied"):
+        _key_exists(registry, "parent")
+
+
+def test_copy_key_tree_propagates_enumeration_errors():
+    """A transient source-enumeration error must not produce a partial copy."""
+    import pytest
+
+    class ContextKey(_RegistryKey):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.Close()
+
+    class Registry(_RegistryWithUndeletableChild):
+        KEY_READ = 4
+        KEY_WRITE = 8
+
+        def OpenKey(self, root, path, reserved, access):
+            return ContextKey(path)
+
+        def CreateKeyEx(self, root, path, reserved, access):
+            return ContextKey(path)
+
+        def EnumValue(self, key, index):
+            raise PermissionError("enumeration denied")
+
+    with pytest.raises(PermissionError, match="enumeration denied"):
+        _copy_key_tree(Registry(), object(), "source", object(), "target")
+
+
+def test_restart_detects_windows_auto_restart_before_launch(monkeypatch):
+    """A replacement shell should prevent a redundant explicit launch."""
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: False)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 100)
+    monkeypatch.setattr(explorer_views, "_process_session_id", lambda pid: 2)
+    monkeypatch.setattr(explorer_views, "_wait_for_replacement_shell", lambda pid, timeout: 200)
+    monkeypatch.setattr(explorer_views, "_schedule_shell_recovery", lambda *args: True)
+    monkeypatch.setattr(
+        explorer_views.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+    monkeypatch.setattr(explorer_views.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    assert explorer_views.restart_explorer()
+
+
+def test_non_elevated_restart_prearms_recovery_before_termination(monkeypatch):
+    """Ordinary callers also need a recovery process before force-killing Explorer."""
+    calls = []
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: False)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 100)
+    monkeypatch.setattr(explorer_views, "_process_session_id", lambda pid: 2)
+    monkeypatch.setattr(
+        explorer_views,
+        "_schedule_shell_recovery",
+        lambda token, pid, path: calls.append(("schedule", token, pid)) or True,
+    )
+    monkeypatch.setattr(
+        explorer_views.subprocess,
+        "run",
+        lambda *args, **kwargs: (
+            calls.append(("kill", args[0])) or subprocess.CompletedProcess(args[0], 0)
+        ),
+    )
+    monkeypatch.setattr(explorer_views.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(explorer_views, "_wait_for_replacement_shell", lambda pid, timeout: 200)
+
+    assert explorer_views.restart_explorer()
+    assert calls[0] == ("schedule", None, 100)
+    assert calls[1][0] == "kill"
+    assert calls[1][1] == [
+        explorer_views._system32_executable("taskkill.exe"),
+        "/f",
+        "/fi",
+        "SESSION eq 2",
+        "/im",
+        "explorer.exe",
+    ]
+
+
+def test_non_elevated_restart_aborts_when_recovery_cannot_start(monkeypatch):
+    """A helper launch failure must leave the current desktop shell untouched."""
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: False)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 100)
+    monkeypatch.setattr(explorer_views, "_process_session_id", lambda pid: 2)
+    monkeypatch.setattr(explorer_views, "_schedule_shell_recovery", lambda *args: False)
+    monkeypatch.setattr(
+        explorer_views.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shell was killed")),
+    )
+
+    assert not explorer_views.restart_explorer()
+
+
+def test_elevated_restart_schedules_recovery_before_termination(monkeypatch):
+    """An elevated restart must have an unelevated recovery process first."""
+    calls = []
+    kernel32 = SimpleNamespace(CloseHandle=lambda token: calls.append(("close", token)))
+    monkeypatch.setattr(explorer_views, "KERNEL32", kernel32)
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: True)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 100)
+    monkeypatch.setattr(explorer_views, "_process_session_id", lambda pid: 2)
+    monkeypatch.setattr(explorer_views, "_shell_token", lambda: 900)
+    monkeypatch.setattr(
+        explorer_views,
+        "_schedule_shell_recovery",
+        lambda token, pid, path: calls.append(("schedule", token, pid)) or True,
+    )
+    monkeypatch.setattr(
+        explorer_views.subprocess,
+        "run",
+        lambda *args, **kwargs: calls.append(("kill",)) or subprocess.CompletedProcess(args[0], 0),
+    )
+    monkeypatch.setattr(explorer_views.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+    monkeypatch.setattr(explorer_views, "_wait_for_replacement_shell", lambda pid, timeout: 200)
+
+    assert explorer_views.restart_explorer()
+    assert calls[0][:1] == ("schedule",)
+    assert calls[1] == ("close", 900)
+    assert calls[2] == ("kill",)
+
+
+def test_elevated_restart_aborts_when_recovery_cannot_start(monkeypatch):
+    """Explorer must remain running when the recovery prerequisite fails."""
+    calls = []
+    monkeypatch.setattr(
+        explorer_views,
+        "KERNEL32",
+        SimpleNamespace(CloseHandle=lambda token: calls.append(("close", token))),
+    )
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: True)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 100)
+    monkeypatch.setattr(explorer_views, "_process_session_id", lambda pid: 2)
+    monkeypatch.setattr(explorer_views, "_shell_token", lambda: 900)
+    monkeypatch.setattr(explorer_views, "_schedule_shell_recovery", lambda *args: False)
+    monkeypatch.setattr(
+        explorer_views.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("shell was killed")),
+    )
+
+    assert not explorer_views.restart_explorer()
+    assert calls == [("close", 900)]
+
+
+def test_restart_fails_closed_without_a_desktop_shell(monkeypatch):
+    """A zero shell PID cannot race a newly launched shell against taskkill."""
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: False)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 0)
+    monkeypatch.setattr(
+        explorer_views,
+        "_schedule_shell_recovery",
+        lambda *args: (_ for _ in ()).throw(AssertionError("helper started")),
+    )
+
+    assert not explorer_views.restart_explorer()
+
+
+def test_recovery_helper_polls_for_the_desktop_shell(monkeypatch):
+    """The helper waits for Windows auto-restart before launching Explorer."""
+    captured = []
+    monkeypatch.setattr(
+        explorer_views,
+        "_create_process_with_token",
+        lambda token, application, command: captured.append(command) or True,
+    )
+    monkeypatch.setattr(explorer_views.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
+
+    assert explorer_views._schedule_shell_recovery(900, 100, r"C:\Windows\explorer.exe")
+    assert "GetShellWindow" in captured[0]
+    assert "Timeout 20" in captured[0]
+    assert "AddSeconds(5)" in captured[0]
+    assert "Get-Process -Name explorer" not in captured[0]
+
+
+def test_taskkill_start_failure_closes_the_shell_token(monkeypatch):
+    """A duplicated shell token is released before any taskkill error path."""
+    calls = []
+    monkeypatch.setattr(
+        explorer_views,
+        "KERNEL32",
+        SimpleNamespace(CloseHandle=lambda token: calls.append(("close", token))),
+    )
+    monkeypatch.setattr(explorer_views, "_is_elevated", lambda: True)
+    monkeypatch.setattr(explorer_views, "_shell_process_id", lambda: 100)
+    monkeypatch.setattr(explorer_views, "_process_session_id", lambda pid: 2)
+    monkeypatch.setattr(explorer_views, "_shell_token", lambda: 900)
+    monkeypatch.setattr(explorer_views, "_schedule_shell_recovery", lambda *args: True)
+    monkeypatch.setattr(
+        explorer_views.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("missing taskkill")),
+    )
+
+    assert not explorer_views.restart_explorer()
+    assert calls == [("close", 900)]

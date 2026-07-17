@@ -17,6 +17,30 @@ import { Icon } from "./icons.jsx";
 // the UI on every pointer move, but bridge writes are throttled to this rate
 // with a trailing write so the final value is always sent.
 const SAVE_THROTTLE_MS = 150;
+const TRANSACTION_KEY = "__vireloTransaction";
+const STATE_ENCODERS = {
+  snapEnabled: ["enable_snap", (value) => value],
+  snapKey: ["snap_key", (value) => value.toLowerCase()],
+  restoreKey: ["restore_key", (value) => value.toLowerCase()],
+  pressCount: ["snap_presses", (value) => value],
+  interval: ["snap_interval", (value) => value],
+  width: ["width_pct", (value) => value],
+  height: ["height_pct", (value) => value],
+  gameMode: ["game_mode_enabled", (value) => value],
+  autoSize: ["ex_auto_size", (value) => value],
+  launchLogin: ["run_at_startup", (value) => value],
+  accent: ["accent", (value) => value],
+  density: ["density", (value) => value],
+  minimizeToTray: ["minimize_to_tray", (value) => value],
+  themeMode: ["theme", (value) => value],
+};
+const PAGE_COMPONENTS = {
+  snap: SnapPage,
+  exp: ExplorerPage,
+  keys: ShortcutsPage,
+  gen: GeneralPage,
+  about: AboutPage,
+};
 
 // Human-readable copy for the raw capture_status tokens from the backend.
 const CAPTURE_STATUS_COPY = {
@@ -34,97 +58,131 @@ function TitleBar({ onOpenPalette, bridge }) {
         height: 34,
         display: "flex",
         alignItems: "center",
-        padding: "0 6px 0 12px",
-        gap: 10,
         background: t.sidebar,
         borderBottom: `1px solid ${t.border}`,
       }}
     >
       <div
         style={{
-          width: 14,
-          height: 14,
-          borderRadius: Math.min(t.radius, 3),
-          background: t.accent,
+          width: 320,
+          height: "100%",
           display: "flex",
           alignItems: "center",
-          justifyContent: "center",
-          color: t.accentOn,
-          fontSize: 9,
-          fontWeight: 700,
+          gap: 10,
+          paddingLeft: 12,
+          flexShrink: 0,
         }}
       >
-        V
-      </div>
-      <div style={{ fontSize: 12, fontWeight: 500, color: t.text }}>Virelo</div>
+        <div
+          style={{
+            width: 14,
+            height: 14,
+            borderRadius: Math.min(t.radius, 3),
+            background: t.accent,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: t.accentOn,
+            fontSize: 9,
+            fontWeight: 700,
+          }}
+        >
+          V
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 500, color: t.text }}>
+          Virelo
+        </div>
 
-      <button
-        onClick={onOpenPalette}
-        style={{
-          marginLeft: 14,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          height: 22,
-          padding: "0 8px 0 8px",
-          background: t.isDark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.035)",
-          border: `1px solid ${t.border}`,
-          borderRadius: t.radius,
-          color: t.textDim,
-          fontSize: 11.5,
-          cursor: "pointer",
-          fontFamily: "inherit",
-          minWidth: 220,
-        }}
-      >
-        <Icon name="search" size={11} />
-        <span style={{ flex: 1, textAlign: "left" }}>Search or jump to...</span>
-        <span style={{ fontFamily: t.mono, fontSize: 10, opacity: 0.7 }}>
-          Ctrl K
-        </span>
-      </button>
+        <button
+          aria-label="Search or jump to commands"
+          onClick={onOpenPalette}
+          style={{
+            marginLeft: 14,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            height: 22,
+            padding: "0 8px",
+            background: t.isDark
+              ? "rgba(255,255,255,0.04)"
+              : "rgba(0,0,0,0.035)",
+            border: `1px solid ${t.border}`,
+            borderRadius: t.radius,
+            color: t.textDim,
+            fontSize: 11.5,
+            cursor: "pointer",
+            fontFamily: "inherit",
+            minWidth: 220,
+          }}
+        >
+          <Icon name="search" size={11} />
+          <span style={{ flex: 1, textAlign: "left" }}>
+            Search or jump to...
+          </span>
+          <span style={{ fontFamily: t.mono, fontSize: 10, opacity: 0.7 }}>
+            Ctrl K
+          </span>
+        </button>
+      </div>
 
       <div style={{ flex: 1 }} />
-      <button
-        onClick={() => bridge.setWindowCommand("minimize", () => {})}
+      <div
         style={{
-          width: 28,
-          height: 26,
+          width: 72,
           display: "flex",
           alignItems: "center",
-          justifyContent: "center",
-          color: t.textDim,
-          fontSize: 10,
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-          fontFamily: "inherit",
+          gap: 10,
+          paddingRight: 6,
+          flexShrink: 0,
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = t.hover)}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
       >
-        {"—"}
-      </button>
-      <button
-        onClick={() => bridge.setWindowCommand("close", () => {})}
-        style={{
-          width: 28,
-          height: 26,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: t.textDim,
-          fontSize: 10,
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-          fontFamily: "inherit",
-        }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = "#e81123")}
-        onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-      >
-        {"x"}
-      </button>
+        <button
+          aria-label="Minimize Virelo"
+          onClick={() => bridge.setWindowCommand("minimize", () => {})}
+          style={{
+            width: 28,
+            height: 26,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: t.textDim,
+            fontSize: 10,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = t.hover)}
+          onMouseLeave={(e) =>
+            (e.currentTarget.style.background = "transparent")
+          }
+        >
+          {"—"}
+        </button>
+        <button
+          aria-label="Close Virelo"
+          onClick={() => bridge.setWindowCommand("close", () => {})}
+          style={{
+            width: 28,
+            height: 26,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: t.textDim,
+            fontSize: 10,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            fontFamily: "inherit",
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "#e81123")}
+          onMouseLeave={(e) =>
+            (e.currentTarget.style.background = "transparent")
+          }
+        >
+          {"x"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -135,6 +193,7 @@ function NavItem({ icon, label, active, onClick, badge, mode }) {
   const iconsOnly = mode === "icons";
   return (
     <button
+      aria-current={active ? "page" : undefined}
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
@@ -182,7 +241,8 @@ function Sidebar({ nav, setNav, app, mode }) {
   const iconsOnly = mode === "icons";
   const width = iconsOnly ? 52 : 208;
   return (
-    <div
+    <nav
+      aria-label="Settings pages"
       style={{
         width,
         background: t.sidebar,
@@ -271,11 +331,11 @@ function Sidebar({ nav, setNav, app, mode }) {
           v{__APP_VERSION__}
         </div>
       )}
-    </div>
+    </nav>
   );
 }
 
-function Footer({ unsaved, onSave, onDiscard, statusMsg }) {
+function Footer({ unsaved, saving, onSave, onDiscard, statusMsg }) {
   const t = useTokens();
   return (
     <div
@@ -289,7 +349,13 @@ function Footer({ unsaved, onSave, onDiscard, statusMsg }) {
       }}
     >
       {statusMsg && (
-        <span style={{ fontSize: 12, color: t.textDim }}>{statusMsg}</span>
+        <span
+          role="status"
+          aria-live="polite"
+          style={{ fontSize: 12, color: t.textDim }}
+        >
+          {statusMsg}
+        </span>
       )}
       <div style={{ flex: 1 }} />
       {unsaved && (
@@ -319,13 +385,14 @@ function Footer({ unsaved, onSave, onDiscard, statusMsg }) {
           </Button>
         </>
       )}
-      <Button variant="primary" onClick={onSave}>
+      <Button variant="primary" onClick={onSave} disabled={!unsaved || saving}>
         Save changes
       </Button>
     </div>
   );
 }
 
+/** Convert backend settings keys and defaults into frontend state. */
 export function bridgeToState(settings) {
   return {
     snapEnabled: settings.enable_snap ?? true,
@@ -345,48 +412,189 @@ export function bridgeToState(settings) {
   };
 }
 
+/** Serialize a frontend state patch for the backend bridge. */
 export function stateToBridge(state) {
-  return JSON.stringify({
-    enable_snap: state.snapEnabled,
-    snap_key: state.snapKey.toLowerCase(),
-    restore_key: state.restoreKey.toLowerCase(),
-    snap_presses: state.pressCount,
-    snap_interval: state.interval,
-    width_pct: state.width,
-    height_pct: state.height,
-    game_mode_enabled: state.gameMode,
-    ex_auto_size: state.autoSize,
-    run_at_startup: state.launchLogin,
-    accent: state.accent,
-    density: state.density,
-    minimize_to_tray: state.minimizeToTray,
-    theme: state.themeMode,
-  });
+  const payload = {};
+  for (const [key, value] of Object.entries(state)) {
+    const encoder = STATE_ENCODERS[key];
+    if (encoder && value !== undefined) {
+      payload[encoder[0]] = encoder[1](value);
+    }
+  }
+  return JSON.stringify(payload);
 }
 
-export default function VireloApp({ bridge }) {
-  const { tweaks } = useTheme();
+export default function VireloApp({ bridge, initialSettings = null }) {
+  const { tweaks, setTweaks } = useTheme();
   const t = useTokens();
   const [nav, setNav] = React.useState("snap");
   const [palette, setPalette] = React.useState(false);
-  const [state, setState] = React.useState({
-    snapEnabled: true,
-    snapKey: "SHIFT",
-    restoreKey: "CTRL",
-    pressCount: 3,
-    interval: 1050,
-    width: 76,
-    height: 76,
-    gameMode: true,
-    autoSize: true,
-    launchLogin: true,
-    accent: "slate",
-    density: "cozy",
-    minimizeToTray: true,
-    themeMode: "system",
-  });
+  const [state, setState] = React.useState(() =>
+    bridgeToState(initialSettings ?? {}),
+  );
   const [unsaved, setUnsaved] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
   const [statusMsg, setStatusMsg] = React.useState("");
+  const [captureActive, setCaptureActive] = React.useState(false);
+  const [modalOpen, setModalOpen] = React.useState(false);
+  const [settingsHydrated, setSettingsHydrated] = React.useState(
+    initialSettings !== null,
+  );
+  const stateRef = React.useRef(state);
+  const dirtyRevisions = React.useRef(new Map());
+  const nextRevision = React.useRef(1);
+  const backendDirty = React.useRef(false);
+  const backendState = React.useRef(
+    initialSettings !== null ? bridgeToState(initialSettings) : null,
+  );
+  const expectedSettingsSignals = React.useRef(new Map());
+  const nextTransaction = React.useRef(1);
+  const operationTail = React.useRef(Promise.resolve());
+  const saveTimer = React.useRef(null);
+  const pendingSave = React.useRef({});
+  const lastSaveAt = React.useRef(0);
+  const mounted = React.useRef(true);
+  const contentRef = React.useRef(null);
+
+  const refreshUnsaved = React.useCallback(() => {
+    if (mounted.current) {
+      setUnsaved(backendDirty.current || dirtyRevisions.current.size > 0);
+    }
+  }, []);
+
+  const removePendingKey = React.useCallback((key) => {
+    if (!(key in pendingSave.current)) return;
+    const next = { ...pendingSave.current };
+    delete next[key];
+    pendingSave.current = next;
+  }, []);
+
+  const applyIncomingSettings = React.useCallback(
+    (settings, context = null) => {
+      const incoming = bridgeToState(settings);
+      const previousBackend = backendState.current;
+      backendState.current = incoming;
+      const next = { ...incoming };
+
+      if (context?.type === "stage") {
+        for (const [key, operationRevision] of context.revisions ?? []) {
+          if (dirtyRevisions.current.get(key) !== operationRevision) {
+            next[key] = stateRef.current[key];
+          }
+        }
+      }
+
+      for (const [key, revision] of dirtyRevisions.current) {
+        const localValue = stateRef.current[key];
+        if (context?.type === "stage" || context?.type === "commit") {
+          // Full-state echoes from our own draft/commit calls can contain an
+          // older value for a different locally edited key. Preserve every
+          // local edit until the operation callback acknowledges its revision.
+          next[key] = localValue;
+          continue;
+        }
+        if (context?.type === "discard" || context?.type === "reset") {
+          const operationRevision = context.revisions?.get(key);
+          if (
+            operationRevision !== undefined &&
+            revision <= operationRevision
+          ) {
+            dirtyRevisions.current.delete(key);
+            removePendingKey(key);
+          } else {
+            next[key] = localValue;
+          }
+          continue;
+        }
+
+        // A signal with no matching frontend operation came from an immediate
+        // backend action such as Ctrl+T or a tray toggle. Only keys that
+        // actually changed in the backend snapshot supersede a local edit;
+        // unrelated unsent edits remain intact.
+        const changedExternally =
+          previousBackend !== null &&
+          !Object.is(incoming[key], previousBackend[key]);
+        if (changedExternally) {
+          dirtyRevisions.current.delete(key);
+          removePendingKey(key);
+        } else {
+          next[key] = localValue;
+        }
+      }
+
+      stateRef.current = next;
+      if (mounted.current) setState(next);
+      refreshUnsaved();
+    },
+    [refreshUnsaved, removePendingKey],
+  );
+
+  const enqueueOperation = React.useCallback((operation) => {
+    const result = operationTail.current.then(operation, operation);
+    operationTail.current = result.catch(() => undefined);
+    return result;
+  }, []);
+
+  const callBridge = React.useCallback(
+    (method, args = [], signalContext = null) =>
+      new Promise((resolve) => {
+        const transactionId = signalContext
+          ? `virelo-${Date.now()}-${nextTransaction.current++}`
+          : null;
+        if (transactionId) {
+          expectedSettingsSignals.current.set(transactionId, signalContext);
+        }
+
+        const callArgs = [...args];
+        if (
+          transactionId &&
+          [
+            "save_settings",
+            "commit_draft",
+            "discard_draft",
+            "reset_defaults",
+          ].includes(method)
+        ) {
+          callArgs.push(transactionId);
+        }
+
+        const removeExpected = () => {
+          if (transactionId) {
+            expectedSettingsSignals.current.delete(transactionId);
+          }
+        };
+        const finish = (rawResult) => {
+          let result;
+          try {
+            result = JSON.parse(rawResult);
+            if (!result || typeof result !== "object") {
+              throw new Error("The response is not a JSON object.");
+            }
+          } catch (error) {
+            result = {
+              ok: false,
+              error: `Invalid response from ${method}: ${error.message}`,
+            };
+          }
+          if (!result.ok) removeExpected();
+          resolve(result);
+        };
+
+        try {
+          if (typeof bridge[method] !== "function") {
+            throw new Error(`Backend method "${method}" is unavailable.`);
+          }
+          bridge[method](...callArgs, finish);
+        } catch (error) {
+          removeExpected();
+          resolve({
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }),
+    [bridge],
+  );
 
   // Footer status helper. Shows a message and clears it after timeoutMs
   // milliseconds; a timeout of 0 keeps the message until it is replaced.
@@ -407,237 +615,383 @@ export default function VireloApp({ bridge }) {
     },
     [],
   );
-
-  // Load initial settings from bridge
   React.useEffect(() => {
-    bridge.get_settings((json) => {
-      try {
-        const r = JSON.parse(json);
-        if (r.ok && r.data) {
-          setState(bridgeToState(r.data));
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  // Load initial settings and subscribe to backend signals.
+  React.useEffect(() => {
+    let active = true;
+    if (initialSettings === null) {
+      bridge.get_settings((json) => {
+        if (!active) return;
+        try {
+          const response = JSON.parse(json);
+          if (response?.ok && response.data) {
+            applyIncomingSettings(response.data, { type: "stage" });
+            setSettingsHydrated(true);
+          } else {
+            const detail = response?.error ? ` ${response.error}` : "";
+            showStatus(`Settings could not be loaded.${detail}`, 5000);
+          }
+        } catch (error) {
+          console.error("[app] Failed to parse initial settings:", error);
+          showStatus("Settings could not be loaded; defaults are shown.", 5000);
         }
-      } catch (e) {
-        console.error("[app] Failed to parse initial settings:", e);
-      }
-    });
-
-    bridge.settings_changed.connect((json) => {
-      try {
-        const settings = JSON.parse(json);
-        setState(bridgeToState(settings));
-      } catch (e) {
-        console.error("[app] Failed to parse settings_changed:", e);
-      }
-    });
-
-    bridge.dirty_changed.connect((isDirty) => {
-      setUnsaved(isDirty);
-    });
-
-    // Subscribe to snap status messages, honoring the backend timeout.
-    bridge.snap_status.connect((message, timeoutMs) => {
-      showStatus(
-        message,
-        typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 3000,
-      );
-    });
-
-    // Map raw capture tokens to readable copy. Terminal states clear after
-    // three seconds; the in-progress state persists until it resolves.
-    bridge.capture_status.connect((status) => {
-      const message = CAPTURE_STATUS_COPY[status] || status;
-      showStatus(message, status === "capturing" ? 0 : 3000);
-    });
-
-    // Folder view operations report completion through views_status. Guard
-    // the connect so a backend without the signal does not crash the UI.
-    if (bridge.views_status) {
-      bridge.views_status.connect((message, timeoutMs) => {
-        showStatus(
-          message,
-          typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 3000,
-        );
       });
     }
-  }, [bridge, showStatus]);
 
-  // Mirror of the latest state so `set` can compute the next full snapshot
+    const onSettingsChanged = (json) => {
+      try {
+        const settings = JSON.parse(json);
+        const transactionId = settings[TRANSACTION_KEY];
+        delete settings[TRANSACTION_KEY];
+        const context = transactionId
+          ? expectedSettingsSignals.current.get(transactionId)
+          : null;
+        if (transactionId)
+          expectedSettingsSignals.current.delete(transactionId);
+        applyIncomingSettings(settings, context ?? null);
+      } catch (error) {
+        console.error("[app] Failed to parse settings_changed:", error);
+      }
+    };
+
+    const onDirtyChanged = (isDirty) => {
+      backendDirty.current = isDirty;
+      refreshUnsaved();
+    };
+
+    const onSnapStatus = (message, timeoutMs) => {
+      showStatus(
+        message,
+        typeof timeoutMs === "number" && timeoutMs >= 0 ? timeoutMs : 3000,
+      );
+    };
+
+    const onCaptureStatus = (status) => {
+      setCaptureActive(status === "capturing");
+      const message = CAPTURE_STATUS_COPY[status] || status;
+      showStatus(message, status === "capturing" ? 0 : 3000);
+    };
+
+    const onViewsStatus = (message, timeoutMs) => {
+      showStatus(
+        message,
+        typeof timeoutMs === "number" && timeoutMs >= 0 ? timeoutMs : 3000,
+      );
+    };
+
+    bridge.settings_changed.connect(onSettingsChanged);
+    bridge.dirty_changed.connect(onDirtyChanged);
+    bridge.snap_status.connect(onSnapStatus);
+    bridge.capture_status.connect(onCaptureStatus);
+    bridge.views_status?.connect(onViewsStatus);
+
+    return () => {
+      active = false;
+      bridge.settings_changed.disconnect?.(onSettingsChanged);
+      bridge.dirty_changed.disconnect?.(onDirtyChanged);
+      bridge.snap_status.disconnect?.(onSnapStatus);
+      bridge.capture_status.disconnect?.(onCaptureStatus);
+      bridge.views_status?.disconnect?.(onViewsStatus);
+    };
+  }, [
+    applyIncomingSettings,
+    bridge,
+    initialSettings,
+    refreshUnsaved,
+    showStatus,
+  ]);
+
+  // Mirror of the latest state so `set` can compute the next local snapshot
   // without calling the bridge inside the setState updater, which must stay
   // pure.
-  const stateRef = React.useRef(state);
   React.useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
+  React.useEffect(() => {
+    if (!settingsHydrated) return;
+    setTweaks({ accent: state.accent, density: state.density });
+  }, [setTweaks, settingsHydrated, state.accent, state.density]);
+
   // Throttled draft writes: the first write in a burst goes out immediately,
   // later writes coalesce into one trailing write per SAVE_THROTTLE_MS
   // window, so the final value in a burst is always sent.
-  const saveTimer = React.useRef(null);
-  const pendingSave = React.useRef(null);
-  const lastSaveAt = React.useRef(0);
-
-  const sendSave = React.useCallback(
-    (next) => {
-      lastSaveAt.current = Date.now();
-      bridge.save_settings(stateToBridge(next), (result) => {
-        try {
-          const r = JSON.parse(result);
-          if (!r.ok) {
-            console.error("[app] save_settings failed:", r.error);
-            showStatus(`Save failed: ${r.error}`, 5000);
-          }
-        } catch (e) {
-          console.error("[app] Failed to parse save_settings result:", e);
-        }
-      });
-    },
-    [bridge, showStatus],
-  );
-
-  const set = React.useCallback(
-    (p) => {
-      const next = { ...stateRef.current, ...p };
-      stateRef.current = next;
-      setState(next);
-      pendingSave.current = next;
-      if (saveTimer.current) return; // A trailing write is already scheduled.
-      const elapsed = Date.now() - lastSaveAt.current;
-      if (elapsed >= SAVE_THROTTLE_MS) {
-        pendingSave.current = null;
-        sendSave(next);
-      } else {
-        saveTimer.current = setTimeout(() => {
-          saveTimer.current = null;
-          const queued = pendingSave.current;
-          pendingSave.current = null;
-          if (queued) sendSave(queued);
-        }, SAVE_THROTTLE_MS - elapsed);
-      }
-    },
-    [sendSave],
-  );
-
-  // Cancel any scheduled trailing write and drop the queued value. Save,
-  // discard, and reset must call this (or flushPendingSave) first so a stale
-  // throttled write cannot fire after the action and resurrect old state.
-  const cancelPendingSave = React.useCallback(() => {
-    if (saveTimer.current) {
-      clearTimeout(saveTimer.current);
-      saveTimer.current = null;
-    }
-    pendingSave.current = null;
-  }, []);
-
-  // Send any queued trailing write immediately so the bridge draft reflects
-  // the latest UI state before a commit.
-  const flushPendingSave = React.useCallback(() => {
+  const takePendingSave = React.useCallback(() => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
     const queued = pendingSave.current;
-    pendingSave.current = null;
-    if (queued) sendSave(queued);
-  }, [sendSave]);
+    pendingSave.current = {};
+    return queued;
+  }, []);
+
+  const queueDraftEntries = React.useCallback(
+    (entries, reportErrors = true) => {
+      if (Object.keys(entries).length === 0)
+        return Promise.resolve({ ok: true });
+      lastSaveAt.current = Date.now();
+      return enqueueOperation(async () => {
+        const patch = {};
+        const revisions = new Map();
+        for (const [key, entry] of Object.entries(entries)) {
+          if (dirtyRevisions.current.get(key) === entry.revision) {
+            patch[key] = entry.value;
+            revisions.set(key, entry.revision);
+          }
+        }
+        if (Object.keys(patch).length === 0) return { ok: true };
+        const result = await callBridge(
+          "save_settings",
+          [stateToBridge(patch)],
+          { type: "stage", revisions },
+        );
+        if (!result.ok && reportErrors) {
+          console.error("[app] save_settings failed:", result.error);
+          showStatus(`Save failed: ${result.error}`, 5000);
+        }
+        return result;
+      });
+    },
+    [callBridge, enqueueOperation, showStatus],
+  );
+
+  const set = React.useCallback(
+    (patch) => {
+      const next = { ...stateRef.current, ...patch };
+      const revision = nextRevision.current++;
+      for (const [key, value] of Object.entries(patch)) {
+        dirtyRevisions.current.set(key, revision);
+        pendingSave.current[key] = { value, revision };
+      }
+      stateRef.current = next;
+      setState(next);
+      refreshUnsaved();
+      if (saveTimer.current) return; // A trailing write is already scheduled.
+      const elapsed = Date.now() - lastSaveAt.current;
+      if (elapsed >= SAVE_THROTTLE_MS) {
+        void queueDraftEntries(takePendingSave());
+      } else {
+        saveTimer.current = setTimeout(() => {
+          saveTimer.current = null;
+          void queueDraftEntries(takePendingSave());
+        }, SAVE_THROTTLE_MS - elapsed);
+      }
+    },
+    [queueDraftEntries, refreshUnsaved, takePendingSave],
+  );
 
   // Flush any queued draft write on unmount so no change is lost.
-  React.useEffect(() => () => flushPendingSave(), [flushPendingSave]);
+  React.useEffect(
+    () => () => {
+      const queued = takePendingSave();
+      void queueDraftEntries(queued, false);
+    },
+    [queueDraftEntries, takePendingSave],
+  );
 
   const handleSave = () => {
-    // Push any queued draft write first; bridge calls are handled in order,
-    // so the commit below operates on the latest state.
-    flushPendingSave();
-    bridge.commit_draft((result) => {
-      try {
-        const r = JSON.parse(result);
-        if (!r.ok) {
-          console.error("[app] commit_draft failed:", r.error);
-          showStatus(`Save failed: ${r.error}`, 5000);
-        }
-      } catch (e) {
-        console.error("[app] Failed to parse commit_draft result:", e);
-        showStatus("Save failed: invalid response from the backend.", 5000);
+    const revisions = new Map(dirtyRevisions.current);
+    if (revisions.size === 0) return;
+    takePendingSave();
+    const patch = {};
+    for (const key of revisions.keys()) patch[key] = stateRef.current[key];
+    lastSaveAt.current = 0;
+    setSaving(true);
+
+    void enqueueOperation(async () => {
+      const staged = await callBridge("save_settings", [stateToBridge(patch)], {
+        type: "stage",
+        revisions,
+      });
+      if (!staged.ok) {
+        console.error("[app] save_settings failed:", staged.error);
+        showStatus(`Save failed: ${staged.error}`, 5000);
+        return false;
       }
+      const committed = await callBridge("commit_draft", [], {
+        type: "commit",
+        revisions,
+      });
+      if (!committed.ok) {
+        console.error("[app] commit_draft failed:", committed.error);
+        showStatus(`Save failed: ${committed.error}`, 5000);
+        return false;
+      }
+
+      backendDirty.current = false;
+      for (const [key, revision] of revisions) {
+        if (dirtyRevisions.current.get(key) === revision) {
+          dirtyRevisions.current.delete(key);
+        }
+      }
+      refreshUnsaved();
+      showStatus(
+        dirtyRevisions.current.size === 0
+          ? "Changes saved."
+          : "Earlier changes saved; newer changes remain.",
+        3000,
+      );
+      return true;
+    }).finally(() => {
+      if (mounted.current) setSaving(false);
     });
   };
 
   const handleDiscard = () => {
-    // Drop any queued draft write so it cannot re-dirty the settings right
-    // after the discard lands.
-    cancelPendingSave();
-    bridge.discard_draft((result) => {
-      try {
-        const r = JSON.parse(result);
-        if (!r.ok) {
-          console.error("[app] discard_draft failed:", r.error);
-          showStatus(`Discard failed: ${r.error}`, 5000);
-        }
-      } catch (e) {
-        console.error("[app] Failed to parse discard_draft result:", e);
-        showStatus("Discard failed: invalid response from the backend.", 5000);
+    const revisions = new Map(dirtyRevisions.current);
+    takePendingSave();
+    lastSaveAt.current = 0;
+    void enqueueOperation(async () => {
+      const context = { type: "discard", revisions };
+      const result = await callBridge("discard_draft", [], context);
+      if (!result.ok) {
+        console.error("[app] discard_draft failed:", result.error);
+        showStatus(`Discard failed: ${result.error}`, 5000);
+        refreshUnsaved();
+        return;
       }
+      let data = result.data;
+      if (!data) {
+        const current = await callBridge("get_settings");
+        if (current.ok) data = current.data;
+      }
+      if (data) applyIncomingSettings(data, context);
+      backendDirty.current = false;
+      for (const [key, revision] of revisions) {
+        if (dirtyRevisions.current.get(key) === revision) {
+          dirtyRevisions.current.delete(key);
+        }
+      }
+      refreshUnsaved();
     });
   };
 
   const handleReset = () => {
-    // Drop any queued draft write so it cannot overwrite the defaults that
-    // the reset is about to install.
-    cancelPendingSave();
-    bridge.reset_defaults((json) => {
-      try {
-        const r = JSON.parse(json);
-        if (r.ok && r.data) {
-          setState(bridgeToState(r.data));
-        }
-      } catch (e) {
-        console.error("[app] Failed to parse reset_defaults result:", e);
+    const revisions = new Map(dirtyRevisions.current);
+    takePendingSave();
+    lastSaveAt.current = 0;
+    void enqueueOperation(async () => {
+      const context = { type: "reset", revisions };
+      const result = await callBridge("reset_defaults", [], context);
+      if (!result.ok) {
+        console.error("[app] reset_defaults failed:", result.error);
+        showStatus(`Reset failed: ${result.error}`, 5000);
+        refreshUnsaved();
+        return;
       }
+      if (result.data) applyIncomingSettings(result.data, context);
+      backendDirty.current = false;
+      for (const [key, revision] of revisions) {
+        if (dirtyRevisions.current.get(key) === revision) {
+          dirtyRevisions.current.delete(key);
+        }
+      }
+      refreshUnsaved();
     });
   };
 
   const handleTestSnap = () => {
     bridge.test_snap((result) => {
       try {
-        const r = JSON.parse(result);
+        const response = JSON.parse(result);
         // On success the backend reports through snap_status, so nothing
         // overwrites that message here.
-        if (!r.ok) {
-          showStatus(`Test snap failed: ${r.error}`, 5000);
+        if (!response?.ok) {
+          showStatus(
+            `Test snap failed: ${response?.error || "The backend rejected the request."}`,
+            5000,
+          );
         }
-      } catch (e) {
-        console.error("[app] Failed to parse test_snap result:", e);
+      } catch (error) {
+        console.error("[app] Failed to parse test_snap result:", error);
+        showStatus(
+          "Test snap failed because the backend returned an invalid response.",
+          5000,
+        );
       }
     });
   };
 
+  const updateModalOpen = React.useCallback((isOpen) => {
+    setModalOpen(Boolean(isOpen));
+  }, []);
+
+  const updateNativeShortcutGuard = React.useCallback(
+    (isGuarded) => {
+      bridge.set_modal_open?.(Boolean(isGuarded), (rawResult) => {
+        try {
+          const result = JSON.parse(rawResult);
+          if (!result?.ok) {
+            const detail = result?.error || "The backend rejected the request.";
+            console.error("[app] set_modal_open failed:", detail);
+            showStatus(`Modal shortcut guard failed: ${detail}`, 5000);
+          }
+        } catch (error) {
+          console.error("[app] Invalid set_modal_open response:", error);
+          showStatus(
+            "Modal shortcut guard failed because the backend returned an invalid response.",
+            5000,
+          );
+        }
+      });
+    },
+    [bridge, showStatus],
+  );
+
+  React.useEffect(() => {
+    updateNativeShortcutGuard(modalOpen || palette);
+  }, [modalOpen, palette, updateNativeShortcutGuard]);
+
+  React.useEffect(
+    () => () => {
+      bridge.set_modal_open?.(false, () => {});
+    },
+    [bridge],
+  );
+
   const app = {
     ...state,
+    unsaved,
     set,
     onTestSnap: handleTestSnap,
     onReset: handleReset,
     bridge,
     showStatus,
+    captureActive,
+    setCaptureActive,
+    setModalOpen: updateModalOpen,
   };
 
-  // Ctrl+K to toggle command palette
+  // Keep temporary surfaces mutually exclusive with key capture and modals.
+  React.useEffect(() => {
+    if (captureActive || modalOpen) setPalette(false);
+  }, [captureActive, modalOpen]);
+
+  // Toggle the command palette with Ctrl+K.
   React.useEffect(() => {
     const on = (e) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
+        if (captureActive || modalOpen) return;
         setPalette((o) => !o);
       }
     };
     window.addEventListener("keydown", on);
     return () => window.removeEventListener("keydown", on);
-  }, []);
+  }, [captureActive, modalOpen]);
 
-  const Page = {
-    snap: SnapPage,
-    exp: ExplorerPage,
-    keys: ShortcutsPage,
-    gen: GeneralPage,
-    about: AboutPage,
-  }[nav];
+  React.useEffect(() => {
+    if (contentRef.current) contentRef.current.scrollTop = 0;
+  }, [nav]);
+
+  const Page = PAGE_COMPONENTS[nav];
 
   return (
     <div
@@ -654,7 +1008,12 @@ export default function VireloApp({ bridge }) {
         position: "relative",
       }}
     >
-      <TitleBar onOpenPalette={() => setPalette(true)} bridge={bridge} />
+      <TitleBar
+        onOpenPalette={() => {
+          if (!captureActive && !modalOpen) setPalette(true);
+        }}
+        bridge={bridge}
+      />
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
         <Sidebar
           nav={nav}
@@ -662,7 +1021,9 @@ export default function VireloApp({ bridge }) {
           app={app}
           mode={tweaks.sidebarMode}
         />
-        <div
+        <main
+          ref={contentRef}
+          tabIndex={-1}
           style={{
             flex: 1,
             overflowY: "auto",
@@ -671,16 +1032,17 @@ export default function VireloApp({ bridge }) {
         >
           <Page app={app} />
           <div style={{ height: 30 }} />
-        </div>
+        </main>
       </div>
       <Footer
         unsaved={unsaved}
+        saving={saving}
         onSave={handleSave}
         onDiscard={handleDiscard}
         statusMsg={statusMsg}
       />
       <CommandPalette
-        open={palette}
+        open={palette && !captureActive && !modalOpen}
         onClose={() => setPalette(false)}
         app={app}
         setNav={setNav}

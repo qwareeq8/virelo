@@ -7,19 +7,20 @@ import os
 import sys
 
 from PySide6 import QtCore, QtGui, QtWidgets
-from win32com.client import Dispatch
 
-from virelo.app.config import APP_NAME, DEFAULTS, normalize_snap_presses
+from virelo.app.config import APP_NAME, DEFAULTS, INSTANCE_WINDOW_PROPERTY, normalize_snap_presses
 from virelo.app.webview import VireloWebView
+from virelo.app.window_hit_test import classify_window_hit
 from virelo.bridge import CaptureGuard, VireloBridge
 from virelo.platform.resources import resource_path
-from virelo.platform.startup import startup_shortcut_spec
+from virelo.platform.startup import ensure_dispatch, startup_shortcut_spec
 from virelo.platform.theme import (
     get_windows_theme,
     normalize_theme_mode,
     resolve_theme,
     toggle_theme_mode,
 )
+from virelo.platform.win32_abi import USER32
 from virelo.services.explorer_service import ExplorerService
 from virelo.services.snap import MultiPressHotkeyListener, SnapRestoreController, SnapService
 from virelo.settings import Settings, SettingsState
@@ -29,17 +30,13 @@ LOG = logging.getLogger("Virelo")
 
 APP_TITLE = APP_NAME
 
-# Window chrome constants for WM_NCHITTEST hit-zone classification
-TITLE_BAR_HEIGHT = 35  # Frontend TitleBar: 34px height + 1px borderBottom
-CONTROLS_WIDTH = 60  # Two 28px window control buttons + right padding margin
-
-
 # ------------------------------------------------------------------------------
-# Startup shortcut management
+# Startup shortcut management.
 # ------------------------------------------------------------------------------
 
 
 def get_startup_shortcut_path() -> str:
+    """Return the current user's Virelo startup-shortcut path."""
     appdata = os.environ.get("APPDATA")
     if not appdata:
         raise RuntimeError("APPDATA is not set.")
@@ -47,34 +44,13 @@ def get_startup_shortcut_path() -> str:
     return os.path.join(startup_dir, f"{APP_NAME}.lnk")
 
 
-def _ensure_dispatch(app_name: str):
-    try:
-        return Dispatch(app_name)
-    except AttributeError:
-        import re
-        import shutil
-
-        LOG.warning("win32com gen_py cache appears corrupted. Rebuilding.")
-        module_list = [m.__name__ for m in sys.modules.values() if getattr(m, "__name__", None)]
-        for module in module_list:
-            if re.match(r"win32com\.gen_py\..+", module):
-                sys.modules.pop(module, None)
-        localappdata = os.environ.get("LOCALAPPDATA")
-        if localappdata:
-            gen_py_path = os.path.join(localappdata, "Temp", "gen_py")
-            if os.path.exists(gen_py_path):
-                shutil.rmtree(gen_py_path, ignore_errors=True)
-        from win32com import client
-
-        return client.gencache.EnsureDispatch(app_name)
-
-
-def create_startup_shortcut():
+def create_startup_shortcut() -> None:
+    """Create or replace the current user's Virelo startup shortcut."""
     shortcut_path = get_startup_shortcut_path()
     script = os.path.abspath(sys.argv[0])
     frozen = bool(getattr(sys, "frozen", False))
     target, args = startup_shortcut_spec(sys.executable, script, frozen)
-    wsh = Dispatch("WScript.Shell")
+    wsh = ensure_dispatch("WScript.Shell")
     os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
     shortcut = wsh.CreateShortcut(shortcut_path)
     shortcut.TargetPath = target
@@ -86,26 +62,32 @@ def create_startup_shortcut():
     shortcut.Save()
 
 
-def remove_startup_shortcut():
+def remove_startup_shortcut() -> None:
+    """Remove the current user's Virelo startup shortcut if it exists."""
     shortcut_path = get_startup_shortcut_path()
     if os.path.exists(shortcut_path):
-        try:
-            os.remove(shortcut_path)
-        except Exception as e:
-            LOG.exception("Failed to remove startup shortcut.", exc_info=e)
+        os.remove(shortcut_path)
+
+
+def sync_startup_shortcut(enabled: bool) -> None:
+    """Make the current-user startup shortcut match the persisted setting."""
+    if enabled:
+        create_startup_shortcut()
+    else:
+        remove_startup_shortcut()
 
 
 # ------------------------------------------------------------------------------
-# Main window with tray icon
+# Main window with tray icon.
 # ------------------------------------------------------------------------------
 
 
 class MainWindow(QtWidgets.QMainWindow):
     """Main application window with tray icon and QWebEngineView frontend.
 
-    UI rendered by React frontend in QWebEngineView. VireloBridge
-    mediates all settings/theme/capture/snap communication. Window is resizable
-    via WM_NCHITTEST (min 860x600, default 1000x620).
+    The React frontend renders inside ``QWebEngineView``. ``VireloBridge``
+    mediates settings, theme, capture, and snap communication. ``WM_NCHITTEST``
+    provides resizing with an 860 by 600 minimum and 1000 by 620 default.
     """
 
     snap_key_status = QtCore.Signal(str, int)
@@ -176,46 +158,51 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
 
-        # snap_enabled used by business logic (SnapRestoreController, _test_snap)
+        # Business logic such as ``SnapRestoreController`` and ``_test_snap`` uses this value.
         self.snap_enabled = bool(self.settings.enable_snap)
 
         # --- Bridge + WebView ---
         self._settings_state = SettingsState(self.settings)
-        self._snap_service = SnapService(None)  # shift_mgr set after construction
+        self._snap_service = SnapService(None)  # ``shift_mgr`` is set after construction.
         self._bridge = VireloBridge(self._settings_state, self._snap_service, parent=self)
         self._bridge.set_main_window(self)
         self._bridge.set_capture_guard(self._capture_guard)
 
         self.webview = VireloWebView(self._bridge, parent=self)
 
-        # Central widget is just the webview -- React handles all UI
+        # React handles all UI, so the web view is the central widget.
         self.setCentralWidget(self.webview)
 
-        # Route snap_key_status signal to bridge
+        # Route the ``snap_key_status`` signal to the bridge.
         self.snap_key_status.connect(self._bridge.snap_status.emit)
 
         # Folder view tasks restart Explorer; bring the autosize worker back
         # afterward (queued from the task's worker thread to the GUI thread).
         self._bridge.explorer_service_restart.connect(self._update_explorer_autosize_thread)
 
-        # Shortcuts
-        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+T"), self, activated=self._toggle_theme)
-        QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Enter"), self, activated=self._test_snap)
-        QtGui.QShortcut(QtGui.QKeySequence("F1"), self, activated=self._show_help)
+        # Register window shortcuts.
+        self._window_shortcuts = [
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+T"), self, activated=self._toggle_theme),
+            QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Enter"), self, activated=self._test_snap),
+            QtGui.QShortcut(QtGui.QKeySequence("F1"), self, activated=self._show_help),
+        ]
 
-        # MultiPressHotkeyListener + SnapRestoreController (per D-01/D-02/D-03)
-        self._hotkey_listener = MultiPressHotkeyListener(self.settings)
+        # Connect the hotkey listener and snap controller under D-01 to D-03.
+        self._hotkey_listener = MultiPressHotkeyListener(
+            self.settings, capture_guard=self._capture_guard
+        )
         self.shift_mgr = SnapRestoreController(self.settings)
         self._hotkey_listener.triggered.connect(self.shift_mgr.perform)
         self.shift_mgr.blocked.connect(lambda message: self.snap_key_status.emit(message, 3000))
         self._snap_service.set_manager(self.shift_mgr)
         self._snap_service.set_listener(self._hotkey_listener)
 
-        # ExplorerService (per D-07/D-08/D-09)
+        # Manage Explorer autosizing through ``ExplorerService`` under D-07 to D-09.
         self._explorer_service = ExplorerService(self.settings, parent=self)
         self._update_explorer_enabled_state()
 
         self._apply_theme_mode(self._theme_mode)
+        QtCore.QTimer.singleShot(0, self._reconcile_startup_shortcut)
 
     # ------------------------------------------------------------------
     # Tray behavior
@@ -259,23 +246,25 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._bridge.wait_for_view_task()
         except Exception:
-            LOG.exception("Waiting for folder view task failed")
+            LOG.exception("Waiting for the folder-view task failed.")
         self._stop_capture_worker()
         self._explorer_service.stop()
         self._stop_theme_sync()
 
     # ------------------------------------------------------------------
-    # Key capture (preserved -- uses bridge signals for status updates)
+    # Key capture uses bridge signals for status updates.
     # ------------------------------------------------------------------
 
     def _start_key_capture(self) -> bool:
-        return self._begin_key_capture("snap", "Press desired snap key... (Esc to cancel)")
+        return self._begin_key_capture("snap", "Press the desired snap key. Press Esc to cancel.")
 
     def _start_restore_key_capture(self) -> bool:
-        return self._begin_key_capture("restore", "Press desired restore key... (Esc to cancel)")
+        return self._begin_key_capture(
+            "restore", "Press the desired restore key. Press Esc to cancel."
+        )
 
     def _begin_key_capture(self, target: str, message: str) -> bool:
-        """Start a key capture session. Returns True when capture began."""
+        """Start a key-capture session and report whether capture began."""
         if not self._capture_guard.try_start():
             self._bridge.snap_status.emit("Key capture already in progress.", 2000)
             return False
@@ -289,7 +278,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._capture_target = None
             self._capture_thread = None
             self._capture_worker = None
-            LOG.exception("Key capture worker construction failed")
+            LOG.exception("Key-capture worker construction failed.")
             self._bridge.snap_status.emit("Key capture could not start.", 3000)
             return False
         self._bridge.snap_status.emit(message, 0)
@@ -305,22 +294,26 @@ class MainWindow(QtWidgets.QMainWindow):
         self._capture_thread.start()
         return True
 
-    def _on_capture_key(self, key: str):
+    def _on_capture_key(self, key: str) -> None:
         key_str = str(key).lower()
         target_key = "restore_key" if self._capture_target == "restore" else "snap_key"
-        self._settings_state.apply_draft({target_key: key_str})
+        result = self._settings_state.apply_draft({target_key: key_str})
+        if not result.get("ok"):
+            self._bridge.capture_status.emit("cancelled")
+            self._bridge.snap_status.emit(result.get("error", "Key binding was not changed."), 5000)
+            return
         self._bridge.settings_changed.emit(self._settings_state.get_json())
         self._bridge.dirty_changed.emit(True)
         self._bridge.capture_status.emit("done")
         label = "Restore" if self._capture_target == "restore" else "Snap"
         self._bridge.snap_status.emit(f"{label} key set to {key_str.upper()}.", 3000)
 
-    def _on_capture_cancelled(self, reason: str):
+    def _on_capture_cancelled(self, reason: str) -> None:
         message = "Key capture timed out." if reason == "timeout" else "Key capture cancelled."
         self._bridge.capture_status.emit("cancelled" if reason != "timeout" else "timeout")
         self._bridge.snap_status.emit(message, 2000)
 
-    def _cancel_key_capture(self):
+    def _cancel_key_capture(self) -> None:
         """Stop an in-progress capture so the global keyboard hook is released.
 
         Signals the worker to stop; the normal cancelled/finished path then
@@ -331,15 +324,15 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 worker.stop()
             except Exception:
-                LOG.exception("Cancelling key capture failed")
+                LOG.exception("Cancelling key capture failed.")
 
-    def _on_capture_finished(self):
+    def _on_capture_finished(self) -> None:
         self._capture_guard.finish()
         self._capture_thread = None
         self._capture_worker = None
         self._capture_target = None
 
-    def _stop_capture_worker(self):
+    def _stop_capture_worker(self) -> None:
         worker = getattr(self, "_capture_worker", None)
         thread = getattr(self, "_capture_thread", None)
         if worker is not None:
@@ -356,64 +349,56 @@ class MainWindow(QtWidgets.QMainWindow):
         self._capture_target = None
 
     # ------------------------------------------------------------------
-    # Business logic actions (preserved)
+    # Business logic actions.
     # ------------------------------------------------------------------
 
-    def _test_snap(self):
+    def _test_snap(self) -> None:
         try:
-            self.shift_mgr.perform(False)
-            self._bridge.snap_status.emit("Snap test applied to the active window.", 2000)
+            if self.shift_mgr.perform(False):
+                self._bridge.snap_status.emit("Snap test applied to the active window.", 2000)
+            else:
+                self._bridge.snap_status.emit("Could not snap the active window.", 2000)
         except Exception:
+            LOG.exception("Testing a snap on the active window failed.")
             self._bridge.snap_status.emit("Could not snap the active window.", 2000)
 
-    def _reset_defaults(self):
-        """Reset all settings to defaults (called from bridge.reset_defaults)."""
-        defaults = DEFAULTS.copy()
-        for key, val in defaults.items():
-            setattr(self.settings, key, val)
-        self.settings.save()
-        self.snap_enabled = bool(defaults["enable_snap"])
-        self._update_snap_enabled_state()
-        self._update_explorer_autosize_thread()
-        self._apply_theme_mode(defaults["theme"])
-        if hasattr(self, "_hotkey_listener"):
-            self._hotkey_listener.update_binding(defaults["snap_key"])
-            self._hotkey_listener.update_restore_key(defaults["restore_key"])
-            self._hotkey_listener.update_press_limit(defaults["snap_presses"])
-        self._bridge.settings_changed.emit(self._settings_state.get_json())
-        self._bridge.snap_status.emit("Defaults loaded.", 3000)
+    def _set_modal_shortcuts_enabled(self, enabled: bool) -> None:
+        """Enable native shortcuts only when no frontend confirmation is modal."""
+        for shortcut in self._window_shortcuts:
+            shortcut.setEnabled(bool(enabled))
 
     def _show_help(self):
         QtWidgets.QMessageBox.information(
             self,
-            "Virelo -- Help",
+            "Virelo Help",
             "* Press Count & Interval: how many times and how fast to press the Snap Key.\n"
             "* Hold the Restore Key while pressing to restore original window size.\n"
             "* Width/Height: snapped window size as % of the current monitor.\n"
             "* Explorer Auto-Size: auto-fit columns on folder change (Details view).\n"
             "* Game Mode: when enabled, fullscreen windows (typically games) are skipped.\n\n"
             "Shortcuts:\n"
-            "  Ctrl+S = Save Settings,  Ctrl+T = Toggle Theme,\n"
-            "  Ctrl+Enter = Test Snap,  F1 = Help",
+            "  Ctrl+T = Toggle Theme,  Ctrl+Enter = Test Snap,\n"
+            "  F1 = Help.",
         )
 
     # ------------------------------------------------------------------
-    # Enable/disable state (delegates to pages)
+    # Enable and disable state delegated to pages.
     # ------------------------------------------------------------------
 
-    def _update_snap_enabled_state(self):
-        pass  # React reads snap_enabled from settings via bridge
-
-    def _update_explorer_enabled_state(self):
+    def _update_explorer_enabled_state(self) -> None:
         self._explorer_service.start()
 
-    def _update_explorer_autosize_thread(self, *args):
-        """Start/stop the Explorer autosize background thread."""
+    def _update_explorer_autosize_thread(self, *_args) -> None:
+        """Start or stop the Explorer autosize background thread."""
         self._explorer_service.start()
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._update_snap_enabled_state()
+        try:
+            if not USER32.SetPropW(int(self.winId()), INSTANCE_WINDOW_PROPERTY, 1):
+                LOG.warning("Could not mark Virelo's native window for single-instance focus.")
+        except Exception:
+            LOG.exception("Could not mark Virelo's native window for single-instance focus.")
         self._update_explorer_enabled_state()
         if self.is_first_show:
             self.is_first_show = False
@@ -421,39 +406,48 @@ class MainWindow(QtWidgets.QMainWindow):
             # reentrant processEvents() inside the show handler.
             QtCore.QTimer.singleShot(0, self.center_on_screen)
 
-    def _toggle_minimize_on_exit(self):
+    def _toggle_minimize_on_exit(self) -> None:
         checked = self.action_minimize_on_exit.isChecked()
-        result = self._settings_state.apply_draft({"minimize_to_tray": checked})
-        if result.get("ok"):
-            commit_result = self._settings_state.commit_draft()
-            if commit_result.get("ok"):
-                self._bridge.settings_changed.emit(self._settings_state.get_json())
-                self._bridge.dirty_changed.emit(False)
-                self._bridge._apply_side_effects(commit_result.get("applied", {}))
-            else:
-                self.action_minimize_on_exit.setChecked(not checked)
-        else:
+        if not self._persist_immediate_settings({"minimize_to_tray": checked}):
             self.action_minimize_on_exit.setChecked(not checked)
 
-    def _toggle_run_at_startup(self):
+    def _toggle_run_at_startup(self) -> None:
         checked = self.action_run_at_startup.isChecked()
-        result = self._settings_state.apply_draft({"run_at_startup": checked})
-        if result.get("ok"):
-            commit_result = self._settings_state.commit_draft()
-            if commit_result.get("ok"):
-                self._bridge.settings_changed.emit(self._settings_state.get_json())
-                self._bridge.dirty_changed.emit(False)
-                self._bridge._apply_side_effects(commit_result.get("applied", {}))
-            else:
-                self.action_run_at_startup.setChecked(not checked)
-        else:
+        if not self._persist_immediate_settings({"run_at_startup": checked}):
             self.action_run_at_startup.setChecked(not checked)
 
-    def _toggle_theme(self):
+    def _toggle_theme(self) -> None:
         new_mode = toggle_theme_mode(self._theme_mode, get_windows_theme())
-        self._apply_theme_mode(new_mode)
+        if not self._persist_immediate_settings({"theme": new_mode}):
+            self._bridge.snap_status.emit("Could not save the theme setting.", 3000)
 
-    def _apply_theme_mode(self, mode: str):
+    def _persist_immediate_settings(self, data: dict) -> bool:
+        """Persist an immediate control without committing the shared draft."""
+        try:
+            result = self._settings_state.persist_immediate(data)
+            if not result.get("ok"):
+                return False
+            self._bridge._apply_side_effects(result.get("applied", {}))
+            self._bridge.dirty_changed.emit(self._settings_state.has_draft)
+            self._bridge.settings_changed.emit(self._settings_state.get_json())
+            return True
+        except Exception:
+            LOG.exception("The immediate settings update failed.")
+            return False
+
+    def _reconcile_startup_shortcut(self) -> None:
+        """Retry the persisted startup preference on every application launch."""
+        try:
+            sync_startup_shortcut(bool(self.settings.run_at_startup))
+        except Exception:
+            LOG.exception("Reconciling the persisted startup shortcut failed.")
+            self._bridge.snap_status.emit(
+                "The run-at-startup setting is saved, but its shortcut could not be updated. "
+                "Virelo will retry at the next launch.",
+                8000,
+            )
+
+    def _apply_theme_mode(self, mode: str) -> None:
         self._theme_mode = normalize_theme_mode(mode, DEFAULTS["theme"])
         if self._theme_mode == "system":
             self._start_theme_sync()
@@ -461,24 +455,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self._stop_theme_sync()
             self.set_theme(self._theme_mode)
 
-    def _start_theme_sync(self):
+    def _start_theme_sync(self) -> None:
         self._sync_system_theme()
 
-    def _stop_theme_sync(self):
-        pass  # Theme changes arrive via colorSchemeChanged; nothing to stop.
+    def _stop_theme_sync(self) -> None:
+        """Leave system-theme synchronization idle for an explicit theme.
 
-    def _sync_system_theme(self):
+        The persistent ``colorSchemeChanged`` connection remains harmless
+        because ``_sync_system_theme`` ignores changes outside system mode.
+        """
+
+    def _sync_system_theme(self) -> None:
         if self._theme_mode != "system":
             return
         effective = resolve_theme("system", get_windows_theme())
         if effective != self._theme_state:
             self.set_theme(effective)
 
-    def set_theme(self, theme: str):
+    def set_theme(self, theme: str) -> None:
+        """Publish the effective theme to the frontend."""
         self._theme_state = theme
         self._bridge.theme_applied.emit(theme)
 
-    def center_on_screen(self):
+    def center_on_screen(self) -> None:
+        """Center the window on the monitor containing the pointer."""
         cursor_pos = QtGui.QCursor.pos()
         screen = (
             QtWidgets.QApplication.screenAt(cursor_pos) or QtWidgets.QApplication.primaryScreen()
@@ -490,7 +490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.move(int(x), int(y))
 
     # ------------------------------------------------------------------
-    # Resizable window via WM_NCHITTEST
+    # Resizable window through ``WM_NCHITTEST``.
     # ------------------------------------------------------------------
 
     def nativeEvent(self, event_type, message):
@@ -499,39 +499,11 @@ class MainWindow(QtWidgets.QMainWindow):
             if msg.message == 0x0084:  # WM_NCHITTEST
                 x = ctypes.c_short(msg.lParam & 0xFFFF).value
                 y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-                # Convert screen coords to window coords
+                # Convert screen coordinates to window coordinates.
                 pos = self.mapFromGlobal(QtCore.QPoint(x, y))
                 rect = self.rect()
-                BORDER = 4  # 4px grab zone
-                result = 0
-                # Edges and corners
-                if pos.x() <= BORDER:
-                    if pos.y() <= BORDER:
-                        result = 13  # HTTOPLEFT
-                    elif pos.y() >= rect.height() - BORDER:
-                        result = 16  # HTBOTTOMLEFT
-                    else:
-                        result = 10  # HTLEFT
-                elif pos.x() >= rect.width() - BORDER:
-                    if pos.y() <= BORDER:
-                        result = 14  # HTTOPRIGHT
-                    elif pos.y() >= rect.height() - BORDER:
-                        result = 17  # HTBOTTOMRIGHT
-                    else:
-                        result = 11  # HTRIGHT
-                elif pos.y() <= BORDER:
-                    result = 12  # HTTOP
-                elif pos.y() >= rect.height() - BORDER:
-                    result = 15  # HTBOTTOM
+                result = classify_window_hit(pos.x(), pos.y(), rect.width(), rect.height())
                 if result:
                     return True, result
-
-                # Title bar drag zone (D-01, D-02, D-03)
-                if (
-                    pos.y() < TITLE_BAR_HEIGHT
-                    and pos.x() >= BORDER
-                    and pos.x() < rect.width() - CONTROLS_WIDTH
-                ):
-                    return True, 2  # HTCAPTION
 
         return super().nativeEvent(event_type, message)

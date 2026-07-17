@@ -3,7 +3,7 @@ import sys
 
 
 def resource_path(relative_path: str) -> str:
-    """Return absolute path to resource, works for dev and PyInstaller."""
+    """Return an absolute resource path for development and PyInstaller builds."""
     base_path = getattr(
         sys,
         "_MEIPASS",

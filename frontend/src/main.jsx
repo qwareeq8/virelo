@@ -2,18 +2,20 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { ThemeProvider } from "./theme.jsx";
 import VireloApp from "./app.jsx";
-import { getBridge, getBridgeSync } from "./bridge.js";
+import { getBridge, getBridgeSync, parseSettingsResult } from "./bridge.js";
 
 /**
- * Inner component that renders AFTER bridge is ready.
- * This avoids the React hooks violation of calling useState after a conditional return.
- * All hooks in this component are called unconditionally.
+ * Render the application after the bridge and initial preferences are ready.
+ *
+ * Keeping these hooks in a separate component lets `Root` render loading and
+ * error states without calling hooks conditionally.
  */
 function AppWithBridge({
   bridge,
   initialTheme,
   initialAccent,
   initialDensity,
+  initialSettings,
 }) {
   const [tweaks, setTweaks] = React.useState({
     theme: initialTheme,
@@ -24,47 +26,32 @@ function AppWithBridge({
   });
 
   React.useEffect(() => {
-    const handler = (theme) => {
+    const onThemeApplied = (theme) => {
       setTweaks((prev) => ({ ...prev, theme }));
     };
-    bridge.theme_applied.connect(handler);
-
-    bridge.settings_changed.connect((json) => {
-      try {
-        const settings = JSON.parse(json);
-        setTweaks((prev) => ({
-          ...prev,
-          accent: settings.accent || prev.accent,
-          density: settings.density || prev.density,
-        }));
-      } catch (e) {
-        console.error("[main] Failed to parse settings_changed for tweaks:", e);
-      }
-    });
+    bridge.theme_applied.connect(onThemeApplied);
+    return () => {
+      bridge.theme_applied.disconnect?.(onThemeApplied);
+    };
   }, [bridge]);
 
-  const handleSetTweaks = (updates) => {
+  const handleSetTweaks = React.useCallback((updates) => {
     setTweaks((prev) => ({ ...prev, ...updates }));
-  };
+  }, []);
 
   return (
     <ThemeProvider tweaks={tweaks} setTweaks={handleSetTweaks}>
-      <VireloApp bridge={bridge} />
+      <VireloApp bridge={bridge} initialSettings={initialSettings} />
     </ThemeProvider>
   );
 }
 
-/**
- * Root component handles bridge initialization only.
- * Uses a single useState + useEffect pair, then conditionally renders
- * either a loading screen or AppWithBridge.
- */
+/** Initialize the bridge and render the corresponding application state. */
 function Root() {
   const [bridgeState, setBridgeState] = React.useState(null);
 
   React.useEffect(() => {
-    // Resolve at most once, from whichever finishes first: the normal
-    // bootstrap path, the failure path, or the timeout fallback.
+    // Resolve at most once from the normal path, failure path, or timeout.
     let settled = false;
     const finish = (payload) => {
       if (settled) return;
@@ -83,36 +70,48 @@ function Root() {
       console.warn(
         "[main] Bridge did not respond within 3 seconds; rendering with defaults.",
       );
-      finish({ bridge: getBridgeSync(), ...defaults });
+      const fallback = getBridgeSync();
+      finish(
+        fallback
+          ? { bridge: fallback, ...defaults }
+          : { error: "Virelo could not connect to its Windows backend." },
+      );
     }, 3000);
     getBridge()
-      .then((b) => {
-        b.get_theme_mode((themeResult) => {
-          b.get_settings((settingsResult) => {
+      .then((bridge) => {
+        bridge.get_theme_mode((themeResult) => {
+          bridge.get_settings((settingsResult) => {
             try {
-              const tr = JSON.parse(themeResult);
-              const sr = JSON.parse(settingsResult);
+              const themeResponse = JSON.parse(themeResult);
+              const settingsData = parseSettingsResult(settingsResult);
               const themeData =
-                tr.ok && tr.data
-                  ? tr.data
+                themeResponse.ok && themeResponse.data
+                  ? themeResponse.data
                   : { mode: "system", effective: "dark" };
-              const settingsData = sr.ok && sr.data ? sr.data : {};
               finish({
-                bridge: b,
+                bridge,
                 initialTheme: themeData.effective || "dark",
                 initialAccent: settingsData.accent || "slate",
                 initialDensity: settingsData.density || "cozy",
+                initialSettings: settingsData,
               });
-            } catch (e) {
-              console.error("[main] Failed to parse initial state:", e);
-              finish({ bridge: b, ...defaults });
+            } catch (error) {
+              console.error("[main] Failed to parse initial state:", error);
+              finish({
+                error: "Virelo could not safely load its initial settings.",
+              });
             }
           });
         });
       })
-      .catch((e) => {
-        console.error("[main] Bridge initialization failed:", e);
-        finish({ bridge: getBridgeSync(), ...defaults });
+      .catch((error) => {
+        console.error("[main] Bridge initialization failed:", error);
+        const fallback = getBridgeSync();
+        finish(
+          fallback
+            ? { bridge: fallback, ...defaults }
+            : { error: "Virelo could not connect to its Windows backend." },
+        );
       });
     return () => clearTimeout(timer);
   }, []);
@@ -120,19 +119,47 @@ function Root() {
   if (!bridgeState) {
     return (
       <div
+        role="status"
+        aria-live="polite"
         style={{
           width: "100%",
           height: "100%",
-          background: "#111113",
+          colorScheme: "light dark",
+          background: "Canvas",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: "#ECECEE",
+          color: "CanvasText",
           fontFamily: '"Inter", "Segoe UI", sans-serif',
           fontSize: 14,
         }}
       >
         Loading Virelo...
+      </div>
+    );
+  }
+
+  if (bridgeState.error) {
+    return (
+      <div
+        role="alert"
+        style={{
+          width: "100%",
+          height: "100%",
+          colorScheme: "light dark",
+          background: "Canvas",
+          color: "CanvasText",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: 32,
+          fontFamily: 'Arial, "Segoe UI", sans-serif',
+          fontSize: 14,
+          textAlign: "center",
+        }}
+      >
+        {bridgeState.error} Restart Virelo. If the problem continues, reinstall
+        the application.
       </div>
     );
   }
@@ -143,9 +170,14 @@ function Root() {
       initialTheme={bridgeState.initialTheme}
       initialAccent={bridgeState.initialAccent}
       initialDensity={bridgeState.initialDensity}
+      initialSettings={bridgeState.initialSettings}
     />
   );
 }
 
-const root = createRoot(document.getElementById("root"));
+const rootElement = document.getElementById("root");
+if (!rootElement) {
+  throw new Error('Virelo cannot start because the "root" element is missing.');
+}
+const root = createRoot(rootElement);
 root.render(<Root />);

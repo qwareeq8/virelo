@@ -1,17 +1,33 @@
+from __future__ import annotations
+
+import logging
+
 from PySide6 import QtCore
 
 from virelo.app.config import APP_NAME, DEFAULTS, ORGANIZATION, SETTINGS_GROUP
 from virelo.platform.theme import normalize_theme_mode
+from virelo.settings.key_validation import validate_key_pair
+
+LOG = logging.getLogger("Virelo")
+
+_SETTING_KEYS = tuple(DEFAULTS)
 
 
 class Settings:
     """Persistent application settings using QSettings."""
 
-    def __init__(self):
-        self._qs = QtCore.QSettings(ORGANIZATION, APP_NAME)
+    def __init__(self, backend: QtCore.QSettings | None = None):
+        """Load settings from the production backend or an injected backend."""
+        self._qs = backend if backend is not None else QtCore.QSettings(ORGANIZATION, APP_NAME)
         self._qs.beginGroup(SETTINGS_GROUP)
-        self.snap_key = str(self._qs.value("snap_key", DEFAULTS["snap_key"], str))
-        self.restore_key = str(self._qs.value("restore_key", DEFAULTS["restore_key"], str))
+        raw_snap_key = self._qs.value("snap_key", DEFAULTS["snap_key"], str)
+        raw_restore_key = self._qs.value("restore_key", DEFAULTS["restore_key"], str)
+        try:
+            self.snap_key, self.restore_key = validate_key_pair(raw_snap_key, raw_restore_key)
+        except ValueError as error:
+            LOG.warning("Invalid persisted key bindings were reset to defaults: %s", error)
+            self.snap_key = DEFAULTS["snap_key"]
+            self.restore_key = DEFAULTS["restore_key"]
         self.enable_snap = _safe_bool(
             self._qs.value("enable_snap", DEFAULTS["enable_snap"], bool),
             DEFAULTS["enable_snap"],
@@ -63,34 +79,54 @@ class Settings:
         )
         self._qs.endGroup()
 
-    def clear(self):
-        self._qs.beginGroup(SETTINGS_GROUP)
-        self._qs.remove("")
-        self._qs.endGroup()
-
     def save(self):
-        self.clear()
+        """Persist owned keys without deleting the settings group first.
+
+        A failed write is rolled back to the values observed before this save.
+        Unknown keys are deliberately preserved for forward compatibility.
+        """
+        self.snap_key, self.restore_key = validate_key_pair(self.snap_key, self.restore_key)
+
         self._qs.beginGroup(SETTINGS_GROUP)
-        self._qs.setValue("snap_key", self.snap_key)
-        self._qs.setValue("restore_key", self.restore_key)
-        self._qs.setValue("enable_snap", self.enable_snap)
-        self._qs.setValue("snap_presses", self.snap_presses)
-        self._qs.setValue("snap_interval", self.snap_interval)
-        self._qs.setValue("width_pct", self.width_pct)
-        self._qs.setValue("height_pct", self.height_pct)
-        self._qs.setValue("ex_auto_size", self.ex_auto_size)
-        self._qs.setValue("run_at_startup", self.run_at_startup)
-        self._qs.setValue("game_mode_enabled", self.game_mode_enabled)
-        self._qs.setValue("theme", self.theme)
-        self._qs.setValue("accent", self.accent)
-        self._qs.setValue("density", self.density)
-        self._qs.setValue("minimize_to_tray", self.minimize_to_tray)
-        self._qs.endGroup()
+        previous = {
+            key: (self._qs.contains(key), self._qs.value(key) if self._qs.contains(key) else None)
+            for key in _SETTING_KEYS
+        }
+        try:
+            for key in _SETTING_KEYS:
+                self._qs.setValue(key, getattr(self, key))
+        except Exception:
+            self._qs.endGroup()
+            self._restore_previous_values(previous)
+            raise
+        else:
+            self._qs.endGroup()
+
         # Flush to the backing store and surface a write failure to the caller
         # instead of silently reporting a clean save.
         self._qs.sync()
         if self._qs.status() != QtCore.QSettings.Status.NoError:
-            raise OSError(f"QSettings write failed: {self._qs.status()}")
+            status = self._qs.status()
+            self._restore_previous_values(previous)
+            raise OSError(f"QSettings write failed with status {status}.")
+
+    def _restore_previous_values(self, previous: dict) -> None:
+        """Best-effort rollback for a failed save operation."""
+        group_open = False
+        try:
+            self._qs.beginGroup(SETTINGS_GROUP)
+            group_open = True
+            for key, (existed, value) in previous.items():
+                if existed:
+                    self._qs.setValue(key, value)
+                else:
+                    self._qs.remove(key)
+            self._qs.sync()
+        except Exception:
+            LOG.exception("Rolling back a failed settings write also failed.")
+        finally:
+            if group_open:
+                self._qs.endGroup()
 
 
 def _safe_int(val, default, bounds=None):

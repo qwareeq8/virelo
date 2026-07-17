@@ -1,18 +1,10 @@
 APP_NAME = "Virelo"
 ORGANIZATION = "Yusuf Qwareeq"
-APP_DISPLAY_NAME = "Virelo"
 APP_VERSION = "1.5.0"
-APP_EXECUTABLE_NAME = "Virelo.exe"
-APP_DIST_DIR_NAME = "Virelo"
-APP_PUBLISHER = "Yusuf Qwareeq"
-APP_SUPPORT_URL = "https://github.com/yusufqwareeq/virelo"
-APP_SETTINGS_ORG = "Yusuf Qwareeq"
-APP_LOG_DIR = "Virelo"
-APP_LOG_FILE = "virelo.log"
-APP_ID = "com.yusufqwareeq.virelo"
 LOG_DIR = "Virelo"
 LOG_FILE = "virelo.log"
 SETTINGS_GROUP = "Settings"
+INSTANCE_WINDOW_PROPERTY = "Virelo.InstanceWindow.v1"
 
 DEFAULTS = {
     "snap_key": "shift",
@@ -33,7 +25,7 @@ DEFAULTS = {
 
 
 def normalize_snap_presses(value):
-    """Coerce to an int in [1, 10]; out-of-range counts silently disable snapping."""
+    """Coerce a press count to an integer from 1 to 10."""
     try:
         val = int(value)
     except Exception:

@@ -7,16 +7,26 @@ import { Icon } from "./icons.jsx";
 
 function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
   const t = useTokens();
-  const [q, setQ] = React.useState("");
-  const [idx, setIdx] = React.useState(0);
+  const [query, setQuery] = React.useState("");
+  const [activeIndex, setActiveIndex] = React.useState(0);
   const inputRef = React.useRef(null);
+  const dialogRef = React.useRef(null);
+  const returnFocusRef = React.useRef(null);
+  const rowRefs = React.useRef([]);
+  const listboxId = React.useId();
 
   React.useEffect(() => {
-    if (open) {
-      setQ("");
-      setIdx(0);
-      setTimeout(() => inputRef.current?.focus(), 30);
-    }
+    if (!open) return undefined;
+    returnFocusRef.current = document.activeElement;
+    setQuery("");
+    setActiveIndex(0);
+    const timer = setTimeout(() => inputRef.current?.focus(), 30);
+    return () => {
+      clearTimeout(timer);
+      const previous = returnFocusRef.current;
+      if (previous?.isConnected) previous.focus();
+      else document.querySelector("main, [role='main'], button")?.focus();
+    };
   }, [open]);
 
   const commands = React.useMemo(
@@ -58,12 +68,16 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
         icon: "play",
         kbd: "⏎",
       },
-      {
-        grp: "Actions",
-        label: "Save changes",
-        run: () => onSave?.(),
-        icon: "check",
-      },
+      ...(app.unsaved
+        ? [
+            {
+              grp: "Actions",
+              label: "Save changes",
+              run: () => onSave?.(),
+              icon: "check",
+            },
+          ]
+        : []),
       {
         grp: "Actions",
         label: app.snapEnabled ? "Disable snap" : "Enable snap",
@@ -125,45 +139,86 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
         icon: "dot",
       },
     ],
-    [app, setNav, onTestSnap, onSave],
+    [
+      app.gameMode,
+      app.set,
+      app.snapEnabled,
+      app.unsaved,
+      onSave,
+      onTestSnap,
+      setNav,
+    ],
   );
 
-  const filtered = q.trim()
-    ? commands.filter((c) => c.label.toLowerCase().includes(q.toLowerCase()))
-    : commands;
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = React.useMemo(
+    () =>
+      normalizedQuery
+        ? commands.filter((command) =>
+            command.label.toLowerCase().includes(normalizedQuery),
+          )
+        : commands,
+    [commands, normalizedQuery],
+  );
 
   const groups = {};
-  filtered.forEach((c) => {
-    (groups[c.grp] = groups[c.grp] || []).push(c);
+  filtered.forEach((command) => {
+    (groups[command.grp] = groups[command.grp] || []).push(command);
   });
 
   React.useEffect(() => {
-    setIdx(0);
-  }, [q]);
+    if (!open) return;
+    const row = rowRefs.current[activeIndex];
+    if (typeof row?.scrollIntoView === "function") {
+      row.scrollIntoView({ block: "nearest" });
+    }
+  }, [activeIndex, open, query]);
   React.useEffect(() => {
     if (!open) return;
-    const on = (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      } else if (event.key === "ArrowDown" && filtered.length > 0) {
+        event.preventDefault();
+        setActiveIndex((index) => Math.min(filtered.length - 1, index + 1));
+      } else if (event.key === "ArrowUp" && filtered.length > 0) {
+        event.preventDefault();
+        setActiveIndex((index) => Math.max(0, index - 1));
+      } else if (
+        event.key === "Enter" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey
+      ) {
+        const command = filtered[activeIndex];
+        if (!command) return;
+        event.preventDefault();
+        command.run();
         onClose();
       }
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setIdx((i) => Math.min(filtered.length - 1, i + 1));
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setIdx((i) => Math.max(0, i - 1));
-      }
-      if (e.key === "Enter") {
-        e.preventDefault();
-        filtered[idx]?.run();
-        onClose();
+      if (event.key === "Tab") {
+        const focusable = Array.from(
+          dialogRef.current?.querySelectorAll(
+            'input, button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ) || [],
+        );
+        if (focusable.length === 0) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     };
-    window.addEventListener("keydown", on);
-    return () => window.removeEventListener("keydown", on);
-  }, [open, filtered, idx, onClose]);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeIndex, filtered, onClose, open]);
 
   if (!open) return null;
   return (
@@ -182,7 +237,11 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
       }}
     >
       <div
-        onClick={(e) => e.stopPropagation()}
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        onClick={(event) => event.stopPropagation()}
         style={{
           width: 480,
           background: t.surface,
@@ -210,9 +269,21 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
           </span>
           <input
             ref={inputRef}
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search settings, jump to…"
+            role="combobox"
+            aria-label="Search commands"
+            aria-expanded="true"
+            aria-controls={listboxId}
+            aria-activedescendant={
+              filtered[activeIndex]
+                ? `${listboxId}-option-${activeIndex}`
+                : undefined
+            }
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActiveIndex(0);
+            }}
+            placeholder="Search settings, jump to..."
             style={{
               flex: 1,
               border: "none",
@@ -225,9 +296,15 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
           />
           <Kbd>Esc</Kbd>
         </div>
-        <div style={{ flex: 1, overflowY: "auto", padding: "6px 0" }}>
+        <div
+          id={listboxId}
+          role="listbox"
+          aria-label="Commands"
+          style={{ flex: 1, overflowY: "auto", padding: "6px 0" }}
+        >
           {filtered.length === 0 && (
             <div
+              role="status"
               style={{
                 padding: 24,
                 textAlign: "center",
@@ -235,11 +312,11 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
                 fontSize: 13,
               }}
             >
-              No results for "{q}"
+              No results for "{query}".
             </div>
           )}
-          {Object.entries(groups).map(([grp, items]) => (
-            <div key={grp}>
+          {Object.entries(groups).map(([groupName, items]) => (
+            <div key={groupName} role="group" aria-label={groupName}>
               <div
                 style={{
                   padding: "6px 14px 2px",
@@ -250,22 +327,28 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
                   letterSpacing: 0.8,
                 }}
               >
-                {grp}
+                {groupName}
               </div>
-              {items.map((c) => {
+              {items.map((command) => {
                 // Capture a per-item flat index so each row's onMouseEnter
                 // closure highlights that row instead of sharing one mutable
                 // counter that ends at the last item.
-                const itemIdx = filtered.indexOf(c);
-                const active = itemIdx === idx;
+                const itemIndex = filtered.indexOf(command);
+                const active = itemIndex === activeIndex;
                 return (
                   <div
-                    key={c.label}
+                    key={command.label}
+                    id={`${listboxId}-option-${itemIndex}`}
+                    role="option"
+                    aria-selected={active}
+                    ref={(element) => {
+                      rowRefs.current[itemIndex] = element;
+                    }}
                     onClick={() => {
-                      c.run();
+                      command.run();
                       onClose();
                     }}
-                    onMouseEnter={() => setIdx(itemIdx)}
+                    onMouseEnter={() => setActiveIndex(itemIndex)}
                     style={{
                       display: "flex",
                       alignItems: "center",
@@ -277,10 +360,12 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
                     }}
                   >
                     <span style={{ color: active ? t.accent : t.textDim }}>
-                      <Icon name={c.icon} size={13} />
+                      <Icon name={command.icon} size={13} />
                     </span>
-                    <span style={{ flex: 1, fontSize: 13 }}>{c.label}</span>
-                    {c.kbd && <Kbd>{c.kbd}</Kbd>}
+                    <span style={{ flex: 1, fontSize: 13 }}>
+                      {command.label}
+                    </span>
+                    {command.kbd && <Kbd>{command.kbd}</Kbd>}
                   </div>
                 );
               })}

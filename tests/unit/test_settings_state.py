@@ -60,6 +60,31 @@ def test_commit_draft_persists(settings_state):
     assert settings_state.has_draft is False
 
 
+def test_immediate_setting_does_not_commit_unrelated_draft(settings_state, mock_settings):
+    """An immediate tray setting must leave an unsaved size edit pending."""
+    settings_state.apply_draft({"width_pct": 50})
+
+    result = settings_state.persist_immediate({"minimize_to_tray": False})
+
+    assert result == {"ok": True, "applied": {"minimize_to_tray": False}}
+    assert mock_settings.minimize_to_tray is False
+    assert mock_settings.width_pct == DEFAULTS["width_pct"]
+    assert settings_state.get_all()["width_pct"] == 50
+    assert settings_state.has_draft is True
+
+
+def test_immediate_setting_supersedes_same_draft_key(settings_state, mock_settings):
+    """An immediate shortcut update must remove a stale draft for that key."""
+    settings_state.apply_draft({"theme": "light", "width_pct": 50})
+
+    settings_state.persist_immediate({"theme": "dark"})
+
+    assert mock_settings.theme == "dark"
+    assert settings_state.get_all()["theme"] == "dark"
+    assert settings_state.get_all()["width_pct"] == 50
+    assert settings_state.has_draft is True
+
+
 def test_discard_draft_clears(settings_state):
     """After apply + discard, has_draft should be False."""
     settings_state.apply_draft({"width_pct": 50})

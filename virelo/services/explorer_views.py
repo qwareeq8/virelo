@@ -1,18 +1,17 @@
 """Explorer default folder view management.
 
-Makes Details view the default for every File Explorer folder type using
-the same registry mechanism as LesFerch/WinSetView, reduced to a single
+The module makes Details view the default for every File Explorer folder type
+with the same registry mechanism as LesFerch/WinSetView, reduced to one
 opinionated action:
 
-1. Back up the affected registry keys to .reg files.
-2. Delete the per-folder view caches (Bags and BagMRU in both hives) and
-   the saved view defaults (Streams\\Defaults) so stale states cannot
-   shadow the new defaults.
-3. Copy HKLM FolderTypes to HKCU (Explorer prefers the HKCU copy) and
-   force LogicalViewMode=Details on every TopViews entry.
-4. Write Details-view bag entries for This PC, which has no FolderTypes
+1. It backs up the affected registry keys to ``.reg`` files.
+2. It deletes the per-folder view caches and saved defaults so stale state
+   cannot shadow the new defaults.
+3. It copies HKLM FolderTypes to HKCU and forces Details on every TopViews
+   entry.
+4. It writes Details-view bag entries for This PC, which has no FolderTypes
    GUID of its own.
-5. Restart Explorer so the running shell drops its cached view state.
+5. It restarts Explorer so the running shell drops its cached view state.
 
 The module separates pure plan construction (testable everywhere) from
 the Windows-only executor (winreg is imported lazily so unit tests can
@@ -21,6 +20,7 @@ import this module on any platform).
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import subprocess
@@ -28,7 +28,21 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 
+from virelo.platform.win32_abi import (
+    ADVAPI32,
+    DWORD,
+    HANDLE,
+    KERNEL32,
+    PROCESS_INFORMATION,
+    SHELL32,
+    STARTUPINFOW,
+    USER32,
+)
+
 LOG = logging.getLogger("Virelo")
+
+REG_EXPORT_TIMEOUT_SECONDS = 15
+TASKKILL_TIMEOUT_SECONDS = 10
 
 # Registry paths, all relative to HKCU unless noted otherwise.
 SHELL_CLASSES = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell"
@@ -72,7 +86,7 @@ class RegValue:
 
     key: str
     name: str
-    kind: str  # "dword", "sz", or "binary"
+    kind: str  # The supported kinds are "dword", "sz", and "binary".
     data: int | str | bytes
 
 
@@ -112,18 +126,50 @@ def top_view_values(top_view_key: str) -> list[RegValue]:
 
 def backup_dir_name(now: datetime) -> str:
     """Return the timestamped directory name for a registry backup."""
-    return now.strftime("view-backup-%Y%m%d-%H%M%S")
+    return now.strftime("view-backup-%Y%m%d-%H%M%S-%f")
 
 
 # ----------------------------------------------------------------------------
-# Windows-only executor (winreg imported lazily; safe to import cross-platform)
+# The Windows-only executor imports ``winreg`` lazily for cross-platform imports.
 # ----------------------------------------------------------------------------
 
 
 def _open_winreg():
+    """Import and return the Windows registry module lazily."""
     import winreg
 
     return winreg
+
+
+def _system32_directory() -> str:
+    """Return the trusted native Windows system directory."""
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    return os.path.join(system_root, "System32")
+
+
+def _system32_executable(name: str) -> str:
+    """Resolve a Windows utility without PATH/current-directory search."""
+    return os.path.join(_system32_directory(), name)
+
+
+def _registry_error_code(exc: OSError) -> int | None:
+    """Return a Windows registry error code from real or test exceptions."""
+    code = getattr(exc, "winerror", None)
+    if isinstance(code, int):
+        return code
+    if exc.args and isinstance(exc.args[0], int):
+        return exc.args[0]
+    return None
+
+
+def _is_missing_registry_key(exc: OSError) -> bool:
+    """Return whether an exception reports a missing registry key."""
+    return isinstance(exc, FileNotFoundError) or _registry_error_code(exc) in (2, 3)
+
+
+def _is_registry_enumeration_end(exc: OSError) -> bool:
+    """Return whether registry enumeration reached the end of its values."""
+    return _registry_error_code(exc) == 259
 
 
 def _delete_key_tree(winreg, root, path: str) -> None:
@@ -131,21 +177,31 @@ def _delete_key_tree(winreg, root, path: str) -> None:
     access = winreg.KEY_ALL_ACCESS | winreg.KEY_WOW64_64KEY
     try:
         key = winreg.OpenKey(root, path, 0, access)
-    except OSError:
-        return
+    except OSError as exc:
+        if _is_missing_registry_key(exc):
+            return
+        raise
+    children = []
     try:
+        index = 0
         while True:
             try:
-                child = winreg.EnumKey(key, 0)
-            except OSError:
-                break
-            _delete_key_tree(winreg, root, path + "\\" + child)
+                children.append(winreg.EnumKey(key, index))
+            except OSError as exc:
+                if _is_registry_enumeration_end(exc):
+                    break
+                raise
+            index += 1
     finally:
         key.Close()
+    for child in children:
+        _delete_key_tree(winreg, root, path + "\\" + child)
     try:
         winreg.DeleteKeyEx(root, path, winreg.KEY_WOW64_64KEY, 0)
-    except OSError:
-        LOG.warning("Could not delete registry key HKCU\\%s", path)
+    except OSError as exc:
+        if _is_missing_registry_key(exc):
+            return
+        raise RuntimeError(f"Could not delete registry key HKCU\\{path}.") from exc
 
 
 def _copy_key_tree(winreg, src_root, src_path: str, dst_root, dst_path: str) -> None:
@@ -158,16 +214,20 @@ def _copy_key_tree(winreg, src_root, src_path: str, dst_root, dst_path: str) -> 
             while True:
                 try:
                     name, data, kind = winreg.EnumValue(src, index)
-                except OSError:
-                    break
+                except OSError as exc:
+                    if _is_registry_enumeration_end(exc):
+                        break
+                    raise
                 winreg.SetValueEx(dst, name, 0, kind, data)
                 index += 1
         index = 0
         while True:
             try:
                 child = winreg.EnumKey(src, index)
-            except OSError:
-                break
+            except OSError as exc:
+                if _is_registry_enumeration_end(exc):
+                    break
+                raise
             _copy_key_tree(
                 winreg, src_root, src_path + "\\" + child, dst_root, dst_path + "\\" + child
             )
@@ -199,8 +259,10 @@ def _force_details_on_folder_types(winreg) -> int:
         while True:
             try:
                 type_guid = winreg.EnumKey(folder_types, index)
-            except OSError:
-                break
+            except OSError as exc:
+                if _is_registry_enumeration_end(exc):
+                    break
+                raise
             index += 1
             top_views = rf"{FOLDER_TYPES_KEY}\{type_guid}\TopViews"
             try:
@@ -210,11 +272,15 @@ def _force_details_on_folder_types(winreg) -> int:
                     while True:
                         try:
                             view_guids.append(winreg.EnumKey(views, view_index))
-                        except OSError:
-                            break
+                        except OSError as exc:
+                            if _is_registry_enumeration_end(exc):
+                                break
+                            raise
                         view_index += 1
-            except OSError:
-                continue
+            except OSError as exc:
+                if _is_missing_registry_key(exc):
+                    continue
+                raise
             for view_guid in view_guids:
                 _write_values(winreg, top_view_values(rf"{top_views}\{view_guid}"))
                 updated += 1
@@ -227,67 +293,85 @@ def _key_exists(winreg, key: str) -> bool:
             winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY
         ).Close()
         return True
-    except OSError:
-        return False
+    except OSError as exc:
+        if _is_missing_registry_key(exc):
+            return False
+        raise
 
 
 def _backup_registry_state() -> str:
-    """Export the affected keys to .reg files. Returns the backup directory.
+    """Export the affected keys to ``.reg`` files and return the backup directory.
 
-    Raises RuntimeError if a key that exists cannot be exported, so the caller
+    Raises ``RuntimeError`` if an existing key cannot be exported, so the caller
     does not destroy view state it has no recovery backup for.
     """
     winreg = _open_winreg()
     base = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Virelo")
-    target = os.path.join(base, backup_dir_name(datetime.now()))
-    os.makedirs(target, exist_ok=True)
+    backup_name = backup_dir_name(datetime.now())
+    target = os.path.join(base, backup_name)
+    suffix = 1
+    while True:
+        try:
+            os.makedirs(target, exist_ok=False)
+            break
+        except FileExistsError:
+            target = os.path.join(base, f"{backup_name}-{suffix:02d}")
+            suffix += 1
     for index, key in enumerate(BACKUP_KEYS):
         out_file = os.path.join(target, f"{index:02d}-{key.rsplit(chr(92), 1)[-1]}.reg")
-        result = subprocess.run(
-            ["reg.exe", "export", "HKCU\\" + key, out_file, "/y", "/reg:64"],
-            capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    _system32_executable("reg.exe"),
+                    "export",
+                    "HKCU\\" + key,
+                    out_file,
+                    "/y",
+                    "/reg:64",
+                ],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+                timeout=REG_EXPORT_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"Backup of HKCU\\{key} timed out after {REG_EXPORT_TIMEOUT_SECONDS} seconds."
+            ) from exc
         if result.returncode != 0:
             if _key_exists(winreg, key):
                 stderr = result.stderr.decode("utf-8", "replace").strip()
                 raise RuntimeError(
-                    f"Backup of existing key HKCU\\{key} failed: {stderr or 'reg.exe error'}"
+                    f"Backup of existing key HKCU\\{key} failed: "
+                    f"{stderr or 'reg.exe reported an error.'}"
                 )
             # Key does not exist yet; nothing to back up.
-            LOG.info("Backup skipped for missing key HKCU\\%s", key)
+            LOG.info("Backup skipped for missing key HKCU\\%s.", key)
     return target
 
 
 def _shell_token():
-    """Duplicate the running shell's token so Explorer can be relaunched
-    without inheriting this process's elevation. Returns a token handle
-    or None."""
-    import ctypes
-    from ctypes import wintypes
+    """Return a duplicate shell token for launching unelevated Explorer.
 
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-
-    hwnd = user32.GetShellWindow()
+    ``None`` indicates that no usable shell token was available.
+    """
+    hwnd = USER32.GetShellWindow()
     if not hwnd:
         return None
-    pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    pid = DWORD()
+    USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     if not pid.value:
         return None
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    process = KERNEL32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
     if not process:
         return None
     try:
         TOKEN_DUPLICATE = 0x0002
         TOKEN_QUERY = 0x0008
-        token = wintypes.HANDLE()
-        if not advapi32.OpenProcessToken(
+        token = HANDLE()
+        if not ADVAPI32.OpenProcessToken(
             process, TOKEN_DUPLICATE | TOKEN_QUERY, ctypes.byref(token)
         ):
             return None
@@ -295,8 +379,8 @@ def _shell_token():
             MAXIMUM_ALLOWED = 0x02000000
             SECURITY_IMPERSONATION = 2
             TOKEN_PRIMARY = 1
-            primary = wintypes.HANDLE()
-            if not advapi32.DuplicateTokenEx(
+            primary = HANDLE()
+            if not ADVAPI32.DuplicateTokenEx(
                 token,
                 MAXIMUM_ALLOWED,
                 None,
@@ -307,121 +391,267 @@ def _shell_token():
                 return None
             return primary
         finally:
-            kernel32.CloseHandle(token)
+            KERNEL32.CloseHandle(token)
     finally:
-        kernel32.CloseHandle(process)
+        KERNEL32.CloseHandle(process)
+
+
+def _shell_process_id() -> int:
+    """Return the desktop shell process ID, or zero when no shell exists."""
+    hwnd = USER32.GetShellWindow()
+    if not hwnd:
+        return 0
+    pid = DWORD()
+    USER32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return int(pid.value)
+
+
+def _process_session_id(process_id: int) -> int | None:
+    """Return the Windows session containing a process, or None on failure."""
+    session_id = DWORD()
+    if not KERNEL32.ProcessIdToSessionId(DWORD(process_id), ctypes.byref(session_id)):
+        return None
+    return int(session_id.value)
+
+
+def _wait_for_replacement_shell(previous_pid: int, timeout: float) -> int:
+    """Wait for a shell whose process differs from the terminated shell."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        current_pid = _shell_process_id()
+        if current_pid and current_pid != previous_pid:
+            return current_pid
+        time.sleep(0.1)
+    return 0
+
+
+def _create_process_with_token(token: HANDLE, application: str, command_line: str) -> bool:
+    """Start one process under a duplicated non-elevated shell token."""
+    startup = STARTUPINFOW()
+    startup.cb = ctypes.sizeof(STARTUPINFOW)
+    info = PROCESS_INFORMATION()
+    mutable_command = ctypes.create_unicode_buffer(command_line)
+    launched = ADVAPI32.CreateProcessWithTokenW(
+        token,
+        0,
+        application,
+        mutable_command,
+        subprocess.CREATE_NO_WINDOW,
+        None,
+        None,
+        ctypes.byref(startup),
+        ctypes.byref(info),
+    )
+    if launched:
+        KERNEL32.CloseHandle(info.hProcess)
+        KERNEL32.CloseHandle(info.hThread)
+    return bool(launched)
+
+
+def _schedule_shell_recovery(token: HANDLE | None, previous_pid: int, explorer: str) -> bool:
+    """Start a recovery helper before killing the current desktop shell.
+
+    The helper waits for the existing shell process to exit and only then
+    starts Explorer if Windows has not already created a replacement. If
+    termination fails, it observes the old PID still running and exits.
+    Elevated callers provide a normal-integrity shell token; ordinary callers
+    launch the same helper directly.
+    """
+    if not previous_pid:
+        return False
+    powershell = os.path.join(
+        _system32_directory(),
+        "WindowsPowerShell",
+        "v1.0",
+        "powershell.exe",
+    )
+    escaped_explorer = explorer.replace("'", "''")
+    script = (
+        "Add-Type -Name NativeMethods -Namespace Virelo "
+        '-MemberDefinition \'[System.Runtime.InteropServices.DllImport("user32.dll")] '
+        "public static extern System.IntPtr GetShellWindow();'; "
+        f"$p=Get-Process -Id {previous_pid} -ErrorAction SilentlyContinue; "
+        f"if ($p) {{ Wait-Process -Id {previous_pid} -Timeout 20 "
+        "-ErrorAction SilentlyContinue }; "
+        f"if (-not (Get-Process -Id {previous_pid} -ErrorAction SilentlyContinue)) {{ "
+        "$deadline=(Get-Date).AddSeconds(5); "
+        "while ([Virelo.NativeMethods]::GetShellWindow() -eq [IntPtr]::Zero "
+        "-and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 200 }; "
+        "if ([Virelo.NativeMethods]::GetShellWindow() -eq [IntPtr]::Zero) "
+        f"{{ Start-Process -FilePath '{escaped_explorer}' }} }}"
+    )
+    command_line = subprocess.list2cmdline(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ]
+    )
+    if token is not None:
+        return _create_process_with_token(token, powershell, command_line)
+    try:
+        subprocess.Popen(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                script,
+            ],
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            close_fds=True,
+        )
+    except OSError:
+        LOG.exception("Could not start the Explorer recovery helper.")
+        return False
+    return True
 
 
 def _is_elevated() -> bool:
+    """Return whether the current process has an elevated Windows token."""
     try:
-        import ctypes
-
-        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        return bool(SHELL32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def _current_process_owns_shell() -> bool:
+    """Return whether Virelo and the desktop shell have the same user SID.
+
+    Over-the-shoulder UAC can run Virelo under an administrator's profile
+    while Explorer belongs to a different standard user. HKCU writes in that
+    state would silently modify the wrong account, so folder-view work must
+    fail closed.
+    """
+    process = current_token = shell_token = None
+    try:
+        import win32api
+        import win32con
+        import win32security
+
+        shell_pid = _shell_process_id()
+        if not shell_pid:
+            return False
+        process = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, shell_pid)
+        current_token = win32security.OpenProcessToken(
+            win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
+        )
+        shell_token = win32security.OpenProcessToken(process, win32con.TOKEN_QUERY)
+
+        def user_sid(token) -> str:
+            sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+            return win32security.ConvertSidToStringSid(sid)
+
+        return user_sid(current_token) == user_sid(shell_token)
+    except Exception:
+        LOG.exception("Could not verify the desktop shell account.")
+        return False
+    finally:
+        for handle in (shell_token, current_token, process):
+            if handle is not None:
+                try:
+                    handle.Close()
+                except Exception:
+                    pass
+
+
+def _folder_view_account_error() -> dict | None:
+    """Return a fail-closed result when Virelo does not own the shell account."""
+    if _current_process_owns_shell():
+        return None
+    return {
+        "ok": False,
+        "error": (
+            "Folder views were not changed because Virelo and File Explorer "
+            "are running as different Windows accounts. Sign in with the "
+            "administrator account instead of entering another account's UAC credentials."
+        ),
+    }
 
 
 def restart_explorer() -> bool:
     """Kill and relaunch Explorer, de-elevating the new shell if possible.
 
-    Returns True if a new Explorer process was started.
+    Returns ``True`` after Windows or the recovery helper creates a replacement
+    desktop shell.
 
-    Safety: when this process is elevated we must NOT relaunch Explorer with
+    When this process is elevated, it must not relaunch Explorer with
     our own token, or the whole desktop shell would run at high integrity.
     If de-elevation via the shell token is unavailable, we skip the restart
     entirely and let the caller tell the user to restart Explorer or sign
     out, rather than spawning an elevated shell.
     """
-    import ctypes
-    from ctypes import wintypes
-
-    token = _shell_token()
     elevated = _is_elevated()
-    if elevated and token is None:
-        LOG.warning(
-            "Skipping Explorer restart: cannot de-elevate the new shell. "
-            "The user must restart Explorer manually."
-        )
+    previous_pid = _shell_process_id()
+    if not previous_pid:
+        LOG.error("Skipping Explorer restart: the current desktop shell was not found.")
         return False
-
-    result = subprocess.run(
-        ["taskkill.exe", "/f", "/im", "explorer.exe"],
-        capture_output=True,
-        creationflags=subprocess.CREATE_NO_WINDOW,
-        check=False,
-    )
-    if result.returncode not in (0, 128):
-        LOG.warning("taskkill explorer.exe returned %s", result.returncode)
-    time.sleep(1.0)
-
+    session_id = _process_session_id(previous_pid)
+    if session_id is None:
+        LOG.error("Skipping Explorer restart: the desktop session could not be identified.")
+        return False
     explorer = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "explorer.exe")
-    if token is not None:
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-
-        class STARTUPINFO(ctypes.Structure):
-            _fields_ = [
-                ("cb", wintypes.DWORD),
-                ("lpReserved", wintypes.LPWSTR),
-                ("lpDesktop", wintypes.LPWSTR),
-                ("lpTitle", wintypes.LPWSTR),
-                ("dwX", wintypes.DWORD),
-                ("dwY", wintypes.DWORD),
-                ("dwXSize", wintypes.DWORD),
-                ("dwYSize", wintypes.DWORD),
-                ("dwXCountChars", wintypes.DWORD),
-                ("dwYCountChars", wintypes.DWORD),
-                ("dwFillAttribute", wintypes.DWORD),
-                ("dwFlags", wintypes.DWORD),
-                ("wShowWindow", wintypes.WORD),
-                ("cbReserved2", wintypes.WORD),
-                ("lpReserved2", ctypes.c_void_p),
-                ("hStdInput", wintypes.HANDLE),
-                ("hStdOutput", wintypes.HANDLE),
-                ("hStdError", wintypes.HANDLE),
-            ]
-
-        class PROCESS_INFORMATION(ctypes.Structure):
-            _fields_ = [
-                ("hProcess", wintypes.HANDLE),
-                ("hThread", wintypes.HANDLE),
-                ("dwProcessId", wintypes.DWORD),
-                ("dwThreadId", wintypes.DWORD),
-            ]
-
-        startup = STARTUPINFO()
-        startup.cb = ctypes.sizeof(STARTUPINFO)
-        info = PROCESS_INFORMATION()
-        launched = advapi32.CreateProcessWithTokenW(
-            token,
-            0,
-            explorer,
-            None,
-            0,
-            None,
-            None,
-            ctypes.byref(startup),
-            ctypes.byref(info),
-        )
-        if launched:
-            kernel32.CloseHandle(info.hProcess)
-            kernel32.CloseHandle(info.hThread)
-        kernel32.CloseHandle(token)
-        if launched:
-            return True
-        LOG.warning("CreateProcessWithTokenW failed (error %s)", ctypes.get_last_error())
-        if elevated:
-            # Never relaunch Explorer with our elevated token as a fallback.
-            LOG.warning("Not relaunching Explorer to avoid an elevated shell.")
+    token = None
+    if elevated:
+        token = _shell_token()
+        if token is None:
+            LOG.warning(
+                "Skipping Explorer restart: cannot de-elevate the new shell. "
+                "The user must restart Explorer manually."
+            )
             return False
-
-    # Only reached when not elevated (direct launch inherits normal integrity).
     try:
-        subprocess.Popen([explorer], close_fds=True)
-        return True
-    except OSError:
-        LOG.exception("Failed to relaunch Explorer")
+        recovery_scheduled = _schedule_shell_recovery(token, previous_pid, explorer)
+    except Exception:
+        LOG.exception("Could not start the Explorer recovery helper.")
+        recovery_scheduled = False
+    finally:
+        # The recovery process has duplicated the token. This process no
+        # longer owns a reason to retain it across taskkill failures.
+        if token is not None:
+            KERNEL32.CloseHandle(token)
+            token = None
+    if not recovery_scheduled:
+        LOG.warning("Skipping Explorer restart: the recovery helper could not start.")
         return False
+
+    try:
+        result = subprocess.run(
+            [
+                _system32_executable("taskkill.exe"),
+                "/f",
+                "/fi",
+                f"SESSION eq {session_id}",
+                "/im",
+                "explorer.exe",
+            ],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+            check=False,
+            timeout=TASKKILL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        LOG.error("Explorer restart aborted: taskkill timed out.")
+        return False
+    except OSError:
+        LOG.exception("Explorer restart aborted: taskkill could not start.")
+        return False
+    if result.returncode not in (0, 128):
+        LOG.warning("taskkill explorer.exe returned %s.", result.returncode)
+        return False
+
+    if _wait_for_replacement_shell(previous_pid, 15.0):
+        return True
+    LOG.error("The Explorer recovery helper did not restore the desktop shell.")
+    return False
 
 
 def apply_details_default() -> dict:
@@ -429,8 +659,11 @@ def apply_details_default() -> dict:
 
     Returns a bridge-style result dict.
     """
-    winreg = _open_winreg()
+    account_error = _folder_view_account_error()
+    if account_error:
+        return account_error
     try:
+        winreg = _open_winreg()
         backup = _backup_registry_state()
 
         for key in VIEW_CACHE_KEYS:
@@ -448,7 +681,7 @@ def apply_details_default() -> dict:
 
         restarted = restart_explorer()
         LOG.info(
-            "Details view applied: %d folder views updated, backup at %s, restart=%s",
+            "Details view was applied to %d folder views; backup=%s; restart=%s.",
             updated,
             backup,
             restarted,
@@ -458,7 +691,7 @@ def apply_details_default() -> dict:
             "data": {"updated": updated, "backup": backup, "restarted": restarted},
         }
     except Exception as e:
-        LOG.exception("apply_details_default failed")
+        LOG.exception("Applying Details as the default folder view failed.")
         return {"ok": False, "error": str(e)}
 
 
@@ -467,14 +700,17 @@ def reset_folder_views() -> dict:
 
     Restarts Explorer. Returns a bridge-style result dict.
     """
-    winreg = _open_winreg()
+    account_error = _folder_view_account_error()
+    if account_error:
+        return account_error
     try:
+        winreg = _open_winreg()
         backup = _backup_registry_state()
         for key in VIEW_CACHE_KEYS:
             _delete_key_tree(winreg, winreg.HKEY_CURRENT_USER, key)
         restarted = restart_explorer()
-        LOG.info("Folder views reset to defaults, backup at %s, restart=%s", backup, restarted)
+        LOG.info("Folder views were reset to defaults; backup=%s; restart=%s.", backup, restarted)
         return {"ok": True, "data": {"backup": backup, "restarted": restarted}}
     except Exception as e:
-        LOG.exception("reset_folder_views failed")
+        LOG.exception("Resetting folder views failed.")
         return {"ok": False, "error": str(e)}

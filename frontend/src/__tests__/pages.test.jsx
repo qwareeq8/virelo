@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ThemeProvider } from "../theme.jsx";
-import { ShortcutsPage, ExplorerPage, SnapPage } from "../pages.jsx";
+import { AboutPage, ShortcutsPage, ExplorerPage, SnapPage } from "../pages.jsx";
 
 // Wrap the component under test in a ThemeProvider with minimal tweaks.
 function renderWithTheme(ui) {
@@ -29,12 +29,16 @@ function makeApp(overrides = {}) {
     accent: "slate",
     density: "cozy",
     themeMode: "system",
+    captureActive: false,
+    setCaptureActive: vi.fn(),
+    setModalOpen: vi.fn(),
     set: vi.fn(),
     onTestSnap: vi.fn(),
     onReset: vi.fn(),
     showStatus: vi.fn(),
     bridge: {
-      capture_key: vi.fn(),
+      capture_key: vi.fn((target, cb) => cb(JSON.stringify({ ok: true }))),
+      cancel_capture: vi.fn((cb) => cb(JSON.stringify({ ok: true }))),
       capture_status: { connect: vi.fn(), disconnect: vi.fn() },
       apply_details_view: vi.fn((cb) =>
         cb(JSON.stringify({ ok: true, data: { started: true } })),
@@ -42,20 +46,21 @@ function makeApp(overrides = {}) {
       reset_folder_views: vi.fn((cb) =>
         cb(JSON.stringify({ ok: true, data: { started: true } })),
       ),
+      views_status: { connect: vi.fn(), disconnect: vi.fn() },
     },
     ...overrides,
   };
 }
 
 describe("ShortcutsPage", () => {
-  it("renders one snap key chip per press in both snap and restore rows", () => {
+  it("Renders one snap key chip per press in both snap and restore rows.", () => {
     renderWithTheme(<ShortcutsPage app={makeApp({ pressCount: 5 })} />);
     // The trigger row and the restore row each show the snap key once per
     // press, so the snap key appears twice per configured press.
     expect(screen.getAllByText("SHIFT")).toHaveLength(10);
   });
 
-  it("shows the restore key as a single held modifier, not repeated presses", () => {
+  it("Shows the restore key as one held modifier.", () => {
     renderWithTheme(<ShortcutsPage app={makeApp({ pressCount: 5 })} />);
     expect(screen.getAllByText("CTRL")).toHaveLength(1);
     expect(screen.getByText("(hold)")).toBeInTheDocument();
@@ -64,7 +69,7 @@ describe("ShortcutsPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("uses singular copy and a single chip pair for pressCount 1", () => {
+  it("Uses singular copy and one chip pair when pressCount is 1.", () => {
     renderWithTheme(<ShortcutsPage app={makeApp({ pressCount: 1 })} />);
     expect(screen.getAllByText("SHIFT")).toHaveLength(2);
     expect(screen.getAllByText("CTRL")).toHaveLength(1);
@@ -72,10 +77,21 @@ describe("ShortcutsPage", () => {
       screen.getByText("Hold CTRL while tapping SHIFT once."),
     ).toBeInTheDocument();
   });
+
+  it("Wraps large shortcut sequences inside the supported window width.", () => {
+    renderWithTheme(<ShortcutsPage app={makeApp({ pressCount: 10 })} />);
+    const triggerRow =
+      screen.getByText("Trigger snap").parentElement.parentElement;
+    const chips = triggerRow.lastElementChild;
+
+    expect(triggerRow.style.flexWrap).toBe("wrap");
+    expect(chips.style.flexWrap).toBe("wrap");
+    expect(chips.style.minWidth).toBe("0px");
+  });
 });
 
 describe("SnapPage size sliders", () => {
-  it("limits the width and height sliders to the backend range 10 to 100", () => {
+  it("Limits the width and height sliders to the backend range 10 to 100.", () => {
     renderWithTheme(<SnapPage app={makeApp()} />);
     const sliders = screen.getAllByRole("slider");
     expect(sliders).toHaveLength(2);
@@ -83,30 +99,69 @@ describe("SnapPage size sliders", () => {
       expect(slider).toHaveAttribute("aria-valuemin", "10");
       expect(slider).toHaveAttribute("aria-valuemax", "100");
     }
+    expect(screen.getByRole("slider", { name: "Width" })).toBeVisible();
+    expect(screen.getByRole("slider", { name: "Height" })).toBeVisible();
+  });
+
+  it("Clears capture state and reports a rejected second capture.", async () => {
+    const app = makeApp();
+    app.bridge.capture_key = vi.fn((target, cb) =>
+      cb(
+        JSON.stringify({
+          ok: false,
+          error: "Key capture is already in progress.",
+        }),
+      ),
+    );
+    renderWithTheme(<SnapPage app={app} />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Snap key: SHIFT" }));
+
+    expect(
+      screen.getByRole("button", { name: "Snap key: SHIFT" }),
+    ).toBeVisible();
+    expect(app.setCaptureActive).toHaveBeenLastCalledWith(false);
+    expect(app.showStatus).toHaveBeenCalledWith(
+      "Key capture is already in progress.",
+      3000,
+    );
   });
 });
 
 describe("ExplorerPage default folder view", () => {
-  it("renders the section title, body copy, and both buttons", () => {
+  it("Renders the section title, body copy, and both buttons.", () => {
     renderWithTheme(<ExplorerPage app={makeApp()} />);
     expect(screen.getByText("Default folder view")).toBeInTheDocument();
     expect(screen.getByText(/the way WinSetView does/)).toBeInTheDocument();
-    expect(screen.getByText("Make Details the default")).toBeInTheDocument();
     expect(
-      screen.getByText("Reset folder views to Windows defaults"),
-    ).toBeInTheDocument();
+      screen.getByRole("button", { name: "Make Details the default" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", {
+        name: "Reset folder views to Windows defaults",
+      }),
+    ).toBeVisible();
   });
 
-  it("shows an in-progress message, not success, when apply starts", async () => {
+  it("Shows an in-progress message instead of success when apply starts.", async () => {
     const app = makeApp();
     renderWithTheme(<ExplorerPage app={app} />);
     const user = userEvent.setup();
-    await user.click(screen.getByText("Make Details the default"));
-    expect(screen.getByText("Make Details the default?")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Make Details the default" }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Make Details the default?",
+    });
     expect(
-      screen.getByText(/Open Explorer windows will close/),
+      screen.getByText(/Finish any file copies, moves, or deletions first/),
     ).toBeInTheDocument();
-    await user.click(screen.getByText("Apply and restart Explorer"));
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Apply and restart Explorer",
+      }),
+    );
     expect(app.bridge.apply_details_view).toHaveBeenCalledTimes(1);
     // The bridge callback only acknowledges a start. The completion message
     // arrives later through the views_status signal, so no success text may
@@ -119,21 +174,49 @@ describe("ExplorerPage default folder view", () => {
       "Details view applied.",
       expect.anything(),
     );
-    // The buttons re-enable once the started acknowledgment arrives.
+    // The start acknowledgment must not permit a duplicate task.
+    expect(screen.getByRole("button", { name: "Working..." })).toBeDisabled();
+    const onViewsStatus = app.bridge.views_status.connect.mock.calls[0][0];
+    act(() =>
+      onViewsStatus("Details is now the default view for all folders.", 6000),
+    );
     expect(
-      screen.getByText("Make Details the default").closest("button"),
+      screen.getByRole("button", { name: "Make Details the default" }),
     ).toBeEnabled();
   });
 
-  it("shows an in-progress message, not success, when reset starts", async () => {
+  it("Moves focus into the confirmation and restores the opener.", async () => {
+    renderWithTheme(<ExplorerPage app={makeApp()} />);
+    const user = userEvent.setup();
+    const opener = screen.getByRole("button", {
+      name: "Make Details the default",
+    });
+
+    await user.click(opener);
+    const dialog = screen.getByRole("dialog", {
+      name: "Make Details the default?",
+    });
+    expect(dialog).toContainElement(document.activeElement);
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it("Shows an in-progress message instead of success when reset starts.", async () => {
     const app = makeApp();
     renderWithTheme(<ExplorerPage app={app} />);
     const user = userEvent.setup();
     await user.click(
-      screen.getByText("Reset folder views to Windows defaults"),
+      screen.getByRole("button", {
+        name: "Reset folder views to Windows defaults",
+      }),
     );
-    expect(screen.getByText("Reset folder views?")).toBeInTheDocument();
-    await user.click(screen.getByText("Reset and restart Explorer"));
+    const dialog = screen.getByRole("dialog", { name: "Reset folder views?" });
+    await user.click(
+      within(dialog).getByRole("button", {
+        name: "Reset and restart Explorer",
+      }),
+    );
     expect(app.bridge.reset_folder_views).toHaveBeenCalledTimes(1);
     expect(app.showStatus).toHaveBeenCalledWith(
       "Resetting folder views. File Explorer will restart...",
@@ -143,50 +226,76 @@ describe("ExplorerPage default folder view", () => {
       "Folder views reset.",
       expect.anything(),
     );
-    expect(
-      screen
-        .getByText("Reset folder views to Windows defaults")
-        .closest("button"),
-    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Working..." })).toBeDisabled();
   });
 
-  it("does not call the bridge when the dialog is cancelled", async () => {
+  it("Does not call the bridge when the dialog is cancelled.", async () => {
     const app = makeApp();
     renderWithTheme(<ExplorerPage app={app} />);
     const user = userEvent.setup();
-    await user.click(screen.getByText("Make Details the default"));
-    await user.click(screen.getByText("Cancel"));
+    await user.click(
+      screen.getByRole("button", { name: "Make Details the default" }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Make Details the default?",
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
     expect(app.bridge.apply_details_view).not.toHaveBeenCalled();
     expect(
-      screen.queryByText("Make Details the default?"),
+      screen.queryByRole("dialog", { name: "Make Details the default?" }),
     ).not.toBeInTheDocument();
   });
 
-  it("surfaces a backend error through showStatus", async () => {
+  it("Surfaces a backend error through showStatus.", async () => {
     const app = makeApp();
     app.bridge.apply_details_view = vi.fn((cb) =>
       cb(JSON.stringify({ ok: false, error: "Explorer restart failed." })),
     );
     renderWithTheme(<ExplorerPage app={app} />);
     const user = userEvent.setup();
-    await user.click(screen.getByText("Make Details the default"));
-    await user.click(screen.getByText("Apply and restart Explorer"));
+    await user.click(
+      screen.getByRole("button", { name: "Make Details the default" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Apply and restart Explorer" }),
+    );
     expect(app.showStatus).toHaveBeenCalledWith(
       "Explorer restart failed.",
       5000,
     );
   });
 
-  it("reports an unsupported backend when the method is missing", async () => {
+  it("Reports an unsupported backend when the method is missing.", async () => {
     const app = makeApp();
     delete app.bridge.apply_details_view;
     renderWithTheme(<ExplorerPage app={app} />);
     const user = userEvent.setup();
-    await user.click(screen.getByText("Make Details the default"));
-    await user.click(screen.getByText("Apply and restart Explorer"));
+    await user.click(
+      screen.getByRole("button", { name: "Make Details the default" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Apply and restart Explorer" }),
+    );
     expect(app.showStatus).toHaveBeenCalledWith(
       "Folder view changes are not supported by this backend build.",
       5000,
     );
+  });
+});
+
+describe("AboutPage semantics", () => {
+  it("Exposes the page heading and license disclosure state.", async () => {
+    renderWithTheme(<AboutPage app={makeApp()} />);
+    const user = userEvent.setup();
+
+    expect(
+      screen.getByRole("heading", { level: 1, name: "About" }),
+    ).toBeVisible();
+    const disclosure = screen.getByRole("button", { name: "View MIT license" });
+    expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    await user.click(disclosure);
+    expect(
+      screen.getByRole("button", { name: "Hide MIT license" }),
+    ).toHaveAttribute("aria-expanded", "true");
   });
 });

@@ -4,13 +4,14 @@ import userEvent from "@testing-library/user-event";
 import { ThemeProvider } from "../theme.jsx";
 import { CommandPalette } from "../panels.jsx";
 
-// Wrap component in ThemeProvider with minimal tweaks
+// Wrap each component in ThemeProvider with the minimum required tweaks.
 function renderPalette(props = {}) {
   const tweaks = { theme: "dark", accent: "slate", density: "cozy", radius: 6 };
   const setTweaks = vi.fn();
   const app = {
     snapEnabled: true,
     gameMode: true,
+    unsaved: true,
     set: vi.fn(),
     ...props.app,
   };
@@ -32,54 +33,76 @@ function renderPalette(props = {}) {
 }
 
 describe("CommandPalette", () => {
-  it("renders the search input when open", () => {
+  it("Renders the search input when open.", () => {
     renderPalette();
-    const input = screen.getByPlaceholderText(/search/i);
+    const input = screen.getByRole("combobox", { name: "Search commands" });
     expect(input).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Command palette" }),
+    ).toContainElement(input);
+    expect(screen.getByRole("listbox", { name: "Commands" })).toBeVisible();
+    expect(screen.getAllByRole("option").length).toBeGreaterThan(10);
   });
 
-  it("shows all commands when no filter is applied", () => {
+  it("Shows all commands when no filter is applied.", () => {
     renderPalette();
-    // Navigate group commands should appear
-    expect(screen.getByText("Go to Window snap")).toBeInTheDocument();
-    expect(screen.getByText("Go to Explorer")).toBeInTheDocument();
-    // Action group commands should appear
-    expect(screen.getByText("Test snap")).toBeInTheDocument();
-    expect(screen.getByText("Save changes")).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Go to Window snap" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("option", { name: "Go to Explorer" }),
+    ).toBeVisible();
+    expect(screen.getByRole("option", { name: /Test snap/ })).toBeVisible();
+    expect(screen.getByRole("option", { name: "Save changes" })).toBeVisible();
   });
 
-  it("filters commands when typing a search query", async () => {
+  it("Does not offer Save when there are no unsaved changes.", () => {
+    renderPalette({ app: { unsaved: false } });
+    expect(
+      screen.queryByRole("option", { name: "Save changes" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Filters commands when typing a search query.", async () => {
     renderPalette();
     const user = userEvent.setup();
-    const input = screen.getByPlaceholderText(/search/i);
+    const input = screen.getByRole("combobox", { name: "Search commands" });
     await user.type(input, "snap");
-    // "Test snap" and "Go to Window snap" should be visible
-    expect(screen.getByText("Test snap")).toBeInTheDocument();
-    expect(screen.getByText("Go to Window snap")).toBeInTheDocument();
-    // Unrelated commands should be filtered out
-    expect(screen.queryByText("Go to Explorer")).not.toBeInTheDocument();
-    expect(screen.queryByText("Go to About")).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Test snap/ })).toBeVisible();
+    expect(
+      screen.getByRole("option", { name: "Go to Window snap" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("option", { name: "Go to Explorer" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Go to About" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("shows no-results message for unmatched filter", async () => {
+  it("Shows a no-results message for an unmatched filter.", async () => {
     renderPalette();
     const user = userEvent.setup();
-    const input = screen.getByPlaceholderText(/search/i);
+    const input = screen.getByRole("combobox", { name: "Search commands" });
     await user.type(input, "zzzznonexistent");
-    expect(screen.getByText(/no results/i)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      'No results for "zzzznonexistent".',
+    );
   });
 
-  it("does not render when open is false", () => {
+  it("Does not render when open is false.", () => {
     renderPalette({ open: false });
-    expect(screen.queryByPlaceholderText(/search/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("dialog", { name: "Command palette" }),
+    ).not.toBeInTheDocument();
   });
 
-  it("highlights the hovered item instead of the last item", async () => {
+  it("Highlights the hovered item instead of the last item.", async () => {
     const setNav = vi.fn();
     renderPalette({ setNav });
     const user = userEvent.setup();
-    const first = screen.getByText("Go to Window snap").closest("div");
-    const second = screen.getByText("Go to Explorer").closest("div");
+    const first = screen.getByRole("option", { name: "Go to Window snap" });
+    const second = screen.getByRole("option", { name: "Go to Explorer" });
     await user.hover(second);
     // The hovered row becomes active and the previously active row clears.
     expect(second.style.background).not.toBe("transparent");
@@ -87,5 +110,52 @@ describe("CommandPalette", () => {
     // Enter runs the hovered command, proving the hover index is correct.
     await user.keyboard("{Enter}");
     expect(setNav).toHaveBeenCalledWith("exp");
+  });
+
+  it("Scrolls the keyboard-highlighted command into view.", async () => {
+    const original = Element.prototype.scrollIntoView;
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      renderPalette();
+      scrollIntoView.mockClear();
+      const user = userEvent.setup();
+
+      await user.keyboard("{ArrowDown}");
+
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+    } finally {
+      if (original) Element.prototype.scrollIntoView = original;
+      else delete Element.prototype.scrollIntoView;
+    }
+  });
+
+  it("Keeps the palette open when Enter has no matching command.", async () => {
+    const onClose = vi.fn();
+    renderPalette({ onClose });
+    const user = userEvent.setup();
+    await user.type(
+      screen.getByRole("combobox", { name: "Search commands" }),
+      "zzzznonexistent",
+    );
+
+    await user.keyboard("{Enter}");
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("dialog", { name: "Command palette" }),
+    ).toBeVisible();
+  });
+
+  it("Does not execute a command for a modified Enter key.", async () => {
+    const setNav = vi.fn();
+    const onClose = vi.fn();
+    renderPalette({ setNav, onClose });
+    const user = userEvent.setup();
+
+    await user.keyboard("{Control>}{Enter}{/Control}");
+
+    expect(setNav).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

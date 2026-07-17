@@ -1,16 +1,16 @@
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
-  base: './',
+  base: "./",
   define: {
-    __APP_VERSION__: JSON.stringify(process.env.VITE_APP_VERSION || 'dev'),
+    __APP_VERSION__: JSON.stringify(process.env.VITE_APP_VERSION || "dev"),
   },
   build: {
-    outDir: 'dist',
+    outDir: "dist",
     assetsInlineLimit: 100000,
-    minify: 'esbuild',
+    minify: "esbuild",
     rollupOptions: {
       output: {
         manualChunks: undefined,
@@ -22,8 +22,8 @@ export default defineConfig({
     strictPort: true,
   },
   test: {
-    environment: 'jsdom',
+    environment: "jsdom",
     globals: true,
-    setupFiles: './src/test-setup.js',
+    setupFiles: "./src/test-setup.js",
   },
 });

@@ -1,14 +1,13 @@
 """QWebChannel bridge between React frontend and Python backend.
 
-Exposes a single VireloBridge QObject with narrow JSON-based Slot methods.
-All inputs are validated. No broad Python object exposure.
+The module exposes one ``VireloBridge`` QObject through narrow, JSON-based
+slots. Every input is validated, and no broad Python object is exposed.
 
 The bridge is registered with QWebChannel as "bridge" so JavaScript accesses
 it as channel.objects.bridge.
 
-All slots return structured JSON payloads:
-  Success: {"ok": true, "data": ...}
-  Failure: {"ok": false, "error": "..."}
+Slots return ``{"ok": true, "data": ...}`` on success and
+``{"ok": false, "error": "..."}`` on failure.
 """
 
 import json
@@ -17,30 +16,39 @@ import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from virelo.app.config import DEFAULTS
 from virelo.services.snap import SnapService
 from virelo.settings.state import SettingsState
 
 LOG = logging.getLogger("Virelo")
+_TRANSACTION_KEY = "__vireloTransaction"
+
+
+def _normalize_transaction_id(value) -> str:
+    """Return a bounded frontend transaction identifier for signal correlation."""
+    if not isinstance(value, str):
+        return ""
+    return value[:128]
 
 
 class VireloBridge(QObject):
     """Narrow JSON bridge between React UI and Python backend.
 
-    All Slot methods accept/return JSON strings (or primitive types).
-    Signals push updates from Python to React.
+    Slot methods accept and return JSON strings or primitive values. Signals
+    push updates from Python to React.
 
-    Registration: QWebChannel.registerObject("bridge", self)
-    JavaScript:   channel.objects.bridge.get_settings(callback)
+    Register the bridge with ``QWebChannel.registerObject("bridge", self)``.
+    JavaScript then calls ``channel.objects.bridge.get_settings(callback)``.
     """
 
-    # --- Signals (Python -> JS) ---
-    settings_changed = Signal(str)  # JSON string of full settings dict
-    theme_applied = Signal(str)  # "dark" or "light" (effective theme)
-    snap_status = Signal(str, int)  # (message, timeout_ms)
-    capture_status = Signal(str)  # "capturing", "done", "cancelled", "timeout"
-    dirty_changed = Signal(bool)  # True = unsaved draft exists, False = clean
-    views_status = Signal(str, int)  # (message, timeout_ms) for folder view tasks
-    explorer_service_restart = Signal()  # Restart autosize worker after Explorer restart
+    # Signals carry backend updates to JavaScript.
+    settings_changed = Signal(str)  # This is the JSON string for the complete settings mapping.
+    theme_applied = Signal(str)  # This is the effective "dark" or "light" theme.
+    snap_status = Signal(str, int)  # These are the message and timeout in milliseconds.
+    capture_status = Signal(str)  # This is a capture state such as "capturing" or "done".
+    dirty_changed = Signal(bool)  # ``True`` means that an unsaved draft exists.
+    views_status = Signal(str, int)  # These describe the state of a folder-view task.
+    explorer_service_restart = Signal()  # This restarts autosizing after Explorer restarts.
 
     def __init__(
         self,
@@ -52,20 +60,39 @@ class VireloBridge(QObject):
         self._state = settings_state
         self._snap = snap_service
 
-        # These are set by MainWindow after construction
+        # ``MainWindow`` sets these references after construction.
         self._main_window = None
         self._capture_guard = None
         self._views_thread: threading.Thread | None = None
 
-    def set_main_window(self, mw):
-        """Set MainWindow reference for theme/capture/startup operations."""
+    def set_main_window(self, mw) -> None:
+        """Set the ``MainWindow`` reference for theme, capture, and startup operations."""
         self._main_window = mw
 
-    def set_capture_guard(self, guard):
-        """Set CaptureGuard for key capture gating."""
+    def set_capture_guard(self, guard) -> None:
+        """Set the ``CaptureGuard`` used to gate key capture."""
         self._capture_guard = guard
 
-    # --- Settings Slots ---
+    @Slot(bool, result=str)
+    def set_modal_open(self, is_open: bool) -> str:
+        """Disable native window shortcuts while a web confirmation is modal."""
+        try:
+            if self._main_window is not None:
+                self._main_window._set_modal_shortcuts_enabled(not bool(is_open))
+            return json.dumps({"ok": True})
+        except Exception as error:
+            LOG.exception("Updating the frontend modal state failed.")
+            return json.dumps({"ok": False, "error": str(error)})
+
+    def _settings_json(self, transaction_id: str = "") -> str:
+        """Serialize settings and optionally identify the frontend operation that emitted them."""
+        settings = self._state.get_all()
+        transaction_id = _normalize_transaction_id(transaction_id)
+        if transaction_id:
+            settings[_TRANSACTION_KEY] = transaction_id
+        return json.dumps(settings)
+
+    # Settings slots.
 
     @Slot(result=str)
     def get_settings(self) -> str:
@@ -74,24 +101,25 @@ class VireloBridge(QObject):
             settings = self._state.get_all()
             return json.dumps({"ok": True, "data": settings})
         except Exception as e:
-            LOG.exception("get_settings failed")
+            LOG.exception("Reading settings through the bridge failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
-    @Slot(str, result=str)
-    def save_settings(self, json_str: str) -> str:
+    @Slot(str, str, result=str)
+    def save_settings(self, json_str: str, transaction_id: str = "") -> str:
         """Store a partial settings update in draft (not persisted).
 
-        Input: JSON dict of key-value pairs.
-        Changes are staged in the draft model. Call commit_draft to persist.
+        The input is a JSON object of key-value pairs. Changes are staged in
+        the draft model until ``commit_draft`` persists them.
         """
         try:
             data = json.loads(json_str)
             if not isinstance(data, dict):
-                return json.dumps({"ok": False, "error": "Expected JSON object"})
+                return json.dumps({"ok": False, "error": "Expected a JSON object."})
+            transaction_id = _normalize_transaction_id(transaction_id)
             result = self._state.apply_draft(data)
             if result.get("ok"):
-                # Push updated settings (with draft overlay) to frontend
-                self.settings_changed.emit(self._state.get_json())
+                # Push settings with the draft overlay to the frontend.
+                self.settings_changed.emit(self._settings_json(transaction_id))
                 self.dirty_changed.emit(self._state.has_draft)
                 if "theme" in data and self._main_window:
                     applied_theme = result.get("applied", {}).get("theme")
@@ -99,38 +127,78 @@ class VireloBridge(QObject):
                         self._main_window._apply_theme_mode(applied_theme)
             return json.dumps(result)
         except json.JSONDecodeError as e:
-            return json.dumps({"ok": False, "error": f"Invalid JSON: {e}"})
+            return json.dumps({"ok": False, "error": f"Invalid JSON: {e}."})
         except Exception as e:
-            LOG.exception("save_settings failed")
+            LOG.exception("Staging settings through the bridge failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
-    @Slot(result=str)
-    def commit_draft(self) -> str:
+    @Slot(str, result=str)
+    def commit_draft(self, transaction_id: str = "") -> str:
         """Persist draft settings to QSettings and apply side effects."""
+        hotkeys_prepared = False
+        previous_hotkeys = None
         try:
+            candidate = self._state.get_all()
+            if self._main_window is not None and hasattr(self._main_window, "_hotkey_listener"):
+                settings = self._state._settings
+                previous_hotkeys = (settings.snap_key, settings.restore_key)
+                desired_hotkeys = (candidate["snap_key"], candidate["restore_key"])
+                if desired_hotkeys != previous_hotkeys:
+                    if not self._main_window._hotkey_listener.update_keys(*desired_hotkeys):
+                        return json.dumps(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "The new keyboard hooks could not be installed. "
+                                    "Your changes remain unsaved."
+                                ),
+                            }
+                        )
+                    hotkeys_prepared = True
             result = self._state.commit_draft()
-            if result.get("ok"):
-                self.settings_changed.emit(self._state.get_json())
-                self.dirty_changed.emit(False)
-                self._apply_side_effects(result.get("applied", {}))
-            return json.dumps(result)
         except Exception as e:
-            LOG.exception("commit_draft failed")
+            if hotkeys_prepared and previous_hotkeys is not None:
+                if not self._main_window._hotkey_listener.update_keys(*previous_hotkeys):
+                    LOG.critical("Could not restore keyboard hooks after commit failure.")
+            LOG.exception("Committing draft settings failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
-    @Slot(result=str)
-    def discard_draft(self) -> str:
+        if not result.get("ok"):
+            if hotkeys_prepared and previous_hotkeys is not None:
+                if not self._main_window._hotkey_listener.update_keys(*previous_hotkeys):
+                    LOG.critical("Could not restore keyboard hooks after rejected commit.")
+            return json.dumps(result)
+
+        # Persistence is the transaction boundary. Once it succeeds, never roll
+        # back the matching hooks because an unrelated UI or service refresh
+        # failed. Doing so would leave runtime hooks out of sync with QSettings.
+        try:
+            self.settings_changed.emit(self._settings_json(transaction_id))
+            self.dirty_changed.emit(False)
+            self._apply_side_effects(
+                result.get("applied", {}), hotkeys_already_applied=hotkeys_prepared
+            )
+        except Exception:
+            LOG.exception("A post-commit settings side effect failed.")
+            self.snap_status.emit(
+                "Settings were saved, but one runtime update failed. Restart Virelo to retry.",
+                7000,
+            )
+        return json.dumps(result)
+
+    @Slot(str, result=str)
+    def discard_draft(self, transaction_id: str = "") -> str:
         """Discard unsaved changes and push persisted settings to frontend."""
         try:
             self._state.discard_draft()
-            self.settings_changed.emit(self._state.get_json())
+            self.settings_changed.emit(self._settings_json(transaction_id))
             self.dirty_changed.emit(False)
             if self._main_window:
                 persisted_theme = self._state._settings.theme
                 self._main_window._apply_theme_mode(persisted_theme)
-            return json.dumps({"ok": True})
+            return json.dumps({"ok": True, "data": self._state.get_all()})
         except Exception as e:
-            LOG.exception("discard_draft failed")
+            LOG.exception("Discarding draft settings failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
     @Slot(result=str)
@@ -138,38 +206,50 @@ class VireloBridge(QObject):
         """Return whether unsaved changes exist."""
         return json.dumps({"ok": True, "data": self._state.has_draft})
 
-    @Slot(result=str)
-    def reset_defaults(self) -> str:
-        """Reset all settings to defaults. Returns new settings as structured payload."""
+    @Slot(str, result=str)
+    def reset_defaults(self, transaction_id: str = "") -> str:
+        """Reset all settings to defaults and return the new structured payload."""
+        hotkeys_prepared = False
+        previous_hotkeys = None
         try:
+            if self._main_window is not None and hasattr(self._main_window, "_hotkey_listener"):
+                settings = self._state._settings
+                previous_hotkeys = (settings.snap_key, settings.restore_key)
+                desired_hotkeys = (DEFAULTS["snap_key"], DEFAULTS["restore_key"])
+                if desired_hotkeys != previous_hotkeys:
+                    if not self._main_window._hotkey_listener.update_keys(*desired_hotkeys):
+                        return json.dumps(
+                            {
+                                "ok": False,
+                                "error": (
+                                    "The default keyboard hooks could not be installed. "
+                                    "Settings were not reset."
+                                ),
+                            }
+                        )
+                    hotkeys_prepared = True
             new_settings = self._state.reset_to_defaults()
-            self.settings_changed.emit(self._state.get_json())
-            self.dirty_changed.emit(False)
-            # Apply all business logic side effects
-            if self._main_window:
-                mw = self._main_window
-                mw._update_snap_enabled_state()
-                mw._update_explorer_autosize_thread()
-                if hasattr(mw, "_hotkey_listener"):
-                    mw._hotkey_listener.update_binding(new_settings["snap_key"])
-                    mw._hotkey_listener.update_restore_key(new_settings["restore_key"])
-                    mw._hotkey_listener.update_press_limit(new_settings["snap_presses"])
-                mw._apply_theme_mode(new_settings["theme"])
-                # Reset must also reconcile the out-of-QSettings side effects,
-                # or the startup shortcut and tray checkmarks drift from the
-                # restored defaults.
-                self._apply_side_effects(
-                    {
-                        "run_at_startup": new_settings["run_at_startup"],
-                        "minimize_to_tray": new_settings["minimize_to_tray"],
-                    }
-                )
-            return json.dumps({"ok": True, "data": new_settings})
         except Exception as e:
-            LOG.exception("reset_defaults failed")
+            if hotkeys_prepared and previous_hotkeys is not None:
+                if not self._main_window._hotkey_listener.update_keys(*previous_hotkeys):
+                    LOG.critical("Could not restore keyboard hooks after reset failure.")
+            LOG.exception("Resetting settings to defaults failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
-    # --- Snap Slots ---
+        try:
+            self.settings_changed.emit(self._settings_json(transaction_id))
+            self.dirty_changed.emit(False)
+            if self._main_window:
+                self._apply_side_effects(new_settings, hotkeys_already_applied=hotkeys_prepared)
+        except Exception:
+            LOG.exception("A post-reset settings side effect failed.")
+            self.snap_status.emit(
+                "Defaults were saved, but one runtime update failed. Restart Virelo to retry.",
+                7000,
+            )
+        return json.dumps({"ok": True, "data": new_settings})
+
+    # Snap slots.
 
     @Slot(result=str)
     def test_snap(self) -> str:
@@ -181,18 +261,18 @@ class VireloBridge(QObject):
             self.snap_status.emit(msg, timeout)
             return json.dumps(result)
         except Exception as e:
-            LOG.exception("test_snap failed")
+            LOG.exception("Testing a snap through the bridge failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
-    # --- Key Capture Slots ---
+    # Key-capture slots.
 
     @Slot(str, result=str)
     def capture_key(self, target: str) -> str:
         """Start key capture for 'snap' or 'restore' target."""
         if target not in ("snap", "restore"):
-            return json.dumps({"ok": False, "error": f"Invalid target: {target}"})
+            return json.dumps({"ok": False, "error": f"Invalid capture target: {target!r}."})
         if self._main_window is None:
-            return json.dumps({"ok": False, "error": "MainWindow not ready"})
+            return json.dumps({"ok": False, "error": "The main window is not ready."})
         try:
             if target == "snap":
                 started = self._main_window._start_key_capture()
@@ -200,10 +280,10 @@ class VireloBridge(QObject):
                 started = self._main_window._start_restore_key_capture()
             # MainWindow emits capture_status("capturing") itself on success.
             if not started:
-                return json.dumps({"ok": False, "error": "Key capture already in progress"})
+                return json.dumps({"ok": False, "error": "Key capture is already in progress."})
             return json.dumps({"ok": True})
         except Exception as e:
-            LOG.exception("capture_key failed")
+            LOG.exception("Starting key capture through the bridge failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
     @Slot(result=str)
@@ -220,10 +300,10 @@ class VireloBridge(QObject):
             self._main_window._cancel_key_capture()
             return json.dumps({"ok": True})
         except Exception as e:
-            LOG.exception("cancel_capture failed")
+            LOG.exception("Cancelling key capture through the bridge failed.")
             return json.dumps({"ok": False, "error": str(e)})
 
-    # --- Theme Slots ---
+    # Theme slots.
 
     @Slot(result=str)
     def get_theme_mode(self) -> str:
@@ -251,7 +331,7 @@ class VireloBridge(QObject):
             return json.dumps({"ok": True, "data": val})
         return json.dumps({"ok": True, "data": False})
 
-    # --- Explorer Default View Slots ---
+    # Explorer default-view slots.
 
     @Slot(result=str)
     def apply_details_view(self) -> str:
@@ -270,18 +350,18 @@ class VireloBridge(QObject):
         not run on the GUI thread. Completion is reported via views_status.
         """
         if self._views_thread is not None and self._views_thread.is_alive():
-            return json.dumps({"ok": False, "error": "A folder view task is already running"})
+            return json.dumps({"ok": False, "error": "A folder-view task is already running."})
 
         # Stop the autosize worker so it does not fight the Explorer restart.
         if self._main_window is not None:
             try:
                 self._main_window._explorer_service.stop()
             except Exception:
-                LOG.exception("Stopping explorer service before view task failed")
+                LOG.exception("Stopping the Explorer service before the folder-view task failed.")
 
         from virelo.services import explorer_views
 
-        def work():
+        def work() -> None:
             try:
                 if kind == "apply":
                     result = explorer_views.apply_details_default()
@@ -294,12 +374,12 @@ class VireloBridge(QObject):
                     self.views_status.emit(message, 6000)
                 else:
                     self.views_status.emit(
-                        f"Folder view update failed: {result.get('error', 'unknown error')}",
+                        f"Folder-view update failed: {result.get('error', 'Unknown error.')}",
                         8000,
                     )
             except Exception as e:
-                LOG.exception("Folder view task failed")
-                self.views_status.emit(f"Folder view update failed: {e}", 8000)
+                LOG.exception("The folder-view task failed.")
+                self.views_status.emit(f"Folder-view update failed: {e}", 8000)
             finally:
                 # Queued back to the GUI thread; restarts the autosize worker
                 # if the setting is enabled.
@@ -312,21 +392,21 @@ class VireloBridge(QObject):
         return json.dumps({"ok": True, "data": {"started": True}})
 
     def wait_for_view_task(self, timeout: float = 10.0) -> None:
-        """Block until any in-flight folder view task finishes (shutdown path)."""
+        """Wait up to ``timeout`` seconds for an in-flight folder-view task."""
         thread = self._views_thread
         if thread is not None and thread.is_alive():
-            LOG.info("Waiting for folder view task to finish before shutdown")
+            LOG.info("Waiting for the folder-view task to finish before shutdown.")
             thread.join(timeout)
 
-    # --- Window Command Slot ---
+    # Window-command slot.
 
     @Slot(str, result=str)
     def setWindowCommand(self, command: str) -> str:
         """Execute a window management command (minimize or close)."""
         if command not in ("minimize", "close"):
-            return json.dumps({"ok": False, "error": f"Unknown command: {command}"})
+            return json.dumps({"ok": False, "error": f"Unknown window command: {command!r}."})
         if self._main_window is None:
-            return json.dumps({"ok": False, "error": "MainWindow not ready"})
+            return json.dumps({"ok": False, "error": "The main window is not ready."})
         try:
             if command == "minimize":
                 self._main_window.showMinimized()
@@ -334,12 +414,12 @@ class VireloBridge(QObject):
                 self._main_window.close()
             return json.dumps({"ok": True})
         except Exception as e:
-            LOG.exception("setWindowCommand(%s) failed", command)
+            LOG.exception("The %r window command failed.", command)
             return json.dumps({"ok": False, "error": str(e)})
 
-    # --- Internal helpers ---
+    # Internal helpers.
 
-    def _apply_side_effects(self, applied: dict):
+    def _apply_side_effects(self, applied: dict, *, hotkeys_already_applied: bool = False) -> None:
         """Apply business logic side effects after settings are committed."""
         if not self._main_window:
             return
@@ -347,7 +427,6 @@ class VireloBridge(QObject):
 
         if "enable_snap" in applied:
             mw.snap_enabled = bool(applied["enable_snap"])
-            mw._update_snap_enabled_state()
 
         if "ex_auto_size" in applied:
             mw._update_explorer_autosize_thread()
@@ -355,26 +434,28 @@ class VireloBridge(QObject):
         if "snap_presses" in applied and hasattr(mw, "_hotkey_listener"):
             mw._hotkey_listener.update_press_limit(applied["snap_presses"])
 
-        if "snap_key" in applied and hasattr(mw, "_hotkey_listener"):
-            mw._hotkey_listener.update_binding(applied["snap_key"])
-
-        if "restore_key" in applied and hasattr(mw, "_hotkey_listener"):
-            mw._hotkey_listener.update_restore_key(applied["restore_key"])
+        if (
+            not hotkeys_already_applied
+            and ("snap_key" in applied or "restore_key" in applied)
+            and hasattr(mw, "_hotkey_listener")
+        ):
+            mw._hotkey_listener.update_keys(mw.settings.snap_key, mw.settings.restore_key)
 
         if "theme" in applied:
             mw._apply_theme_mode(applied["theme"])
 
         if "run_at_startup" in applied:
             try:
-                from virelo.app.window import create_startup_shortcut, remove_startup_shortcut
+                from virelo.app.window import sync_startup_shortcut
 
-                if applied["run_at_startup"]:
-                    create_startup_shortcut()
-                else:
-                    remove_startup_shortcut()
+                sync_startup_shortcut(bool(applied["run_at_startup"]))
             except Exception:
-                LOG.exception("Startup shortcut error")
-                self.snap_status.emit("Failed to update startup shortcut.", 5000)
+                LOG.exception("Updating the startup shortcut failed.")
+                self.snap_status.emit(
+                    "The run-at-startup setting was saved, but its shortcut could not be "
+                    "updated. Virelo will retry at the next launch.",
+                    8000,
+                )
 
         if "minimize_to_tray" in applied:
             mw.minimize_to_tray_on_exit = bool(applied["minimize_to_tray"])

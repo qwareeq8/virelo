@@ -24,9 +24,6 @@ def _make_settings(**overrides):
     return obj
 
 
-# -- _rect_matches_monitor --
-
-
 def test_rect_matches_monitor_exact():
     """Exact match should return True."""
     assert _rect_matches_monitor((0, 0, 1920, 1080), (0, 0, 1920, 1080)) is True
@@ -34,7 +31,7 @@ def test_rect_matches_monitor_exact():
 
 def test_rect_matches_monitor_within_tolerance():
     """Rect within FULLSCREEN_TOLERANCE pixels of monitor edges should match."""
-    assert FULLSCREEN_TOLERANCE >= 2  # sanity check the constant
+    assert FULLSCREEN_TOLERANCE >= 2  # Sanity-check the constant.
     assert _rect_matches_monitor((-2, -1, 1922, 1081), (0, 0, 1920, 1080)) is True
 
 
@@ -46,9 +43,6 @@ def test_rect_does_not_match_monitor():
 def test_rect_matches_negative_coords():
     """Second monitor with negative coords should still match."""
     assert _rect_matches_monitor((-1920, 0, 0, 1080), (-1920, 0, 0, 1080)) is True
-
-
-# -- calculate_snap_position --
 
 
 def test_calculate_snap_position_76pct():
@@ -80,33 +74,30 @@ def test_calculate_snap_position_offset_monitor():
     x, y, w, h = calculate_snap_position(1920, 0, 2560, 1440, 76, 76)
     assert w == 2560 * 76 // 100  # 1945
     assert h == 1440 * 76 // 100  # 1094
-    # x includes monitor_left offset
+    # The x position includes the monitor's left offset.
     assert x == 1920 + (2560 - w) // 2
     assert y == (1440 - h) // 2
 
 
 def test_calculate_snap_position_negative_coords():
     """Snap geometry on monitor with negative origin (left-of-primary layout)."""
-    # Monitor at x=-1920, y=0, size 1920x1080
+    # The monitor starts at x=-1920 and is 1920x1080 pixels.
     x, y, w, h = calculate_snap_position(-1920, 0, 1920, 1080, 76, 76)
     assert w == 1920 * 76 // 100  # 1459
     assert h == 1080 * 76 // 100  # 820
-    # x should be within the negative-coordinate monitor
+    # The x position must remain within the negative-coordinate monitor.
     assert x == -1920 + (1920 - w) // 2  # -1690
     assert y == (1080 - h) // 2  # 130
 
 
 def test_calculate_snap_position_vertical_layout():
     """Snap on monitor below primary (y offset, vertical multi-monitor)."""
-    # Monitor at x=0, y=1080, size 2560x1440
+    # The monitor starts at y=1080 and is 2560x1440 pixels.
     x, y, w, h = calculate_snap_position(0, 1080, 2560, 1440, 76, 76)
     assert w == 2560 * 76 // 100  # 1945
     assert h == 1440 * 76 // 100  # 1094
     assert x == (2560 - w) // 2  # 307
     assert y == 1080 + (1440 - h) // 2  # 1253
-
-
-# -- SnapRestoreController restore --
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Win32 APIs only available on Windows")
@@ -116,17 +107,16 @@ def test_restore_maximized_window():
     from ctypes import wintypes
 
     import win32con
-    import win32gui
 
     from virelo.services.snap import SnapRestoreController
 
-    # Create SnapRestoreController bypassing __init__ (avoids keyboard hooks and EnumWindows)
+    # Bypass initialization to avoid keyboard hooks and window enumeration.
     mgr = SnapRestoreController.__new__(SnapRestoreController)
     mgr.settings = _make_settings()
 
     test_hwnd = 12345
 
-    # Simulate a window that was maximized before snap
+    # Simulate a window that was maximized before snapping.
     mgr._orig_sizes = {
         test_hwnd: {
             "rect": (100, 100, 800, 600),
@@ -150,17 +140,15 @@ def test_restore_maximized_window():
     with (
         patch("virelo.services.snap.get_monitor_rect", return_value=(0, 0, 1920, 1080)),
         patch("virelo.services.snap.USER32") as mock_user32,
+        patch("virelo.services.snap.win32gui.ShowWindow") as mock_show_window,
         patch("PySide6.QtWidgets.QApplication", mock_qapp, create=True),
     ):
         mock_user32.GetWindowRect.side_effect = fake_get_window_rect
 
-        # Reset ShowWindow mock to track calls cleanly
-        win32gui.ShowWindow.reset_mock()
-
         mgr._restore(test_hwnd)
 
-    # The key assertion: ShowWindow called with SW_MAXIMIZE because was_maximized=True
-    win32gui.ShowWindow.assert_called_once_with(test_hwnd, win32con.SW_MAXIMIZE)
+    # A previously maximized window must return to its maximized state.
+    mock_show_window.assert_called_once_with(test_hwnd, win32con.SW_MAXIMIZE)
 
-    # Verify the hwnd was removed from _orig_sizes (consumed by restore)
+    # Restoring consumes the saved window geometry.
     assert test_hwnd not in mgr._orig_sizes

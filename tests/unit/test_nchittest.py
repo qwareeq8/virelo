@@ -11,17 +11,22 @@ import sys
 
 import pytest
 
-# -- WM_NCHITTEST return codes --
-HTCAPTION = 2
-HTLEFT = 10
-HTRIGHT = 11
-HTTOP = 12
-HTTOPLEFT = 13
-HTTOPRIGHT = 14
-HTBOTTOM = 15
-HTBOTTOMLEFT = 16
-HTBOTTOMRIGHT = 17
-
+from virelo.app.window_hit_test import (
+    HTBOTTOM,
+    HTBOTTOMLEFT,
+    HTBOTTOMRIGHT,
+    HTCAPTION,
+    HTLEFT,
+    HTRIGHT,
+    HTTOP,
+    HTTOPLEFT,
+    HTTOPRIGHT,
+    RESIZE_BORDER,
+    TITLE_BAR_CONTROLS_WIDTH,
+    TITLE_BAR_HEIGHT,
+    TITLE_BAR_INTERACTIVE_WIDTH,
+    classify_window_hit,
+)
 
 # ---------------------------------------------------------------------------
 # Helper: signed 16-bit extraction (mirrors ctypes.c_short(val & 0xFFFF).value)
@@ -40,49 +45,13 @@ def signed_short(val):
 
 
 # ---------------------------------------------------------------------------
-# Helper: hit-zone classification (mirrors nativeEvent logic)
+# Helper: hit-zone classification
 # ---------------------------------------------------------------------------
 
 
-def classify_hit(pos_x, pos_y, width, height, border=4, title_bar_height=35, controls_width=60):
-    """Classify a window-relative position into an NCHITTEST result code.
-
-    Mirrors the priority logic in MainWindow.nativeEvent:
-    1. Edges and corners (BORDER grab zone) -- highest priority
-    2. Title bar drag zone (HTCAPTION) -- below border, excluding controls area
-    3. Fall through (return 0) -- let super() handle
-    """
-    result = 0
-
-    # 1. Edges and corners
-    if pos_x <= border:
-        if pos_y <= border:
-            result = HTTOPLEFT
-        elif pos_y >= height - border:
-            result = HTBOTTOMLEFT
-        else:
-            result = HTLEFT
-    elif pos_x >= width - border:
-        if pos_y <= border:
-            result = HTTOPRIGHT
-        elif pos_y >= height - border:
-            result = HTBOTTOMRIGHT
-        else:
-            result = HTRIGHT
-    elif pos_y <= border:
-        result = HTTOP
-    elif pos_y >= height - border:
-        result = HTBOTTOM
-
-    if result:
-        return result
-
-    # 2. Title bar drag zone (HTCAPTION)
-    if pos_y < title_bar_height and pos_x >= border and pos_x < width - controls_width:
-        return HTCAPTION
-
-    # 3. Fall through
-    return 0
+def classify_hit(pos_x, pos_y, width, height):
+    """Call the production hit-zone classifier."""
+    return classify_window_hit(pos_x, pos_y, width, height)
 
 
 # ===========================================================================
@@ -122,7 +91,7 @@ class TestSignedShort:
 # ===========================================================================
 # Tests: classify_hit (hit-zone classification)
 # ===========================================================================
-# Standard window: 1000x620, border=4, title_bar_height=35, controls_width=60
+# Standard window: 1000x620 with production title-bar constants.
 
 
 class TestClassifyHit:
@@ -132,9 +101,14 @@ class TestClassifyHit:
         """Center of title bar returns HTCAPTION."""
         assert classify_hit(500, 10, 1000, 620) == HTCAPTION
 
-    def test_htcaption_left_side_title_bar(self):
-        """Left side of title bar (below border) returns HTCAPTION."""
-        assert classify_hit(100, 5, 1000, 620) == HTCAPTION
+    def test_search_area_is_client_content(self):
+        """The logo, title, and search area remain clickable client content."""
+        assert classify_hit(100, 10, 1000, 620) == 0
+        assert classify_hit(TITLE_BAR_INTERACTIVE_WIDTH - 1, 10, 1000, 620) == 0
+
+    def test_drag_region_starts_after_search_area(self):
+        """The empty spacer immediately after the search area drags the window."""
+        assert classify_hit(TITLE_BAR_INTERACTIVE_WIDTH, 10, 1000, 620) == HTCAPTION
 
     def test_htleft_edge(self):
         """Left edge of window returns HTLEFT."""
@@ -169,26 +143,33 @@ class TestClassifyHit:
         assert classify_hit(500, 618, 1000, 620) == HTBOTTOM
 
     def test_controls_area_not_htcaption(self):
-        """Controls area (x >= 940) does NOT return HTCAPTION."""
+        """The complete 72-pixel controls area remains clickable."""
+        boundary = 1000 - TITLE_BAR_CONTROLS_WIDTH
+        assert classify_hit(boundary, 10, 1000, 620) == 0
         assert classify_hit(960, 10, 1000, 620) == 0
 
+    def test_top_edge_of_window_controls_remains_clickable(self):
+        """The first pixel after the resize edge is client content."""
+        assert classify_hit(960, RESIZE_BORDER, 1000, 620) == 0
+
     def test_below_title_bar_falls_through(self):
-        """Position below title bar (y >= 35) falls through to 0."""
+        """Position below the title bar falls through to client handling."""
         assert classify_hit(500, 100, 1000, 620) == 0
 
     def test_just_before_controls_is_htcaption(self):
-        """Position just before controls area (x=939) returns HTCAPTION."""
-        assert classify_hit(939, 10, 1000, 620) == HTCAPTION
+        """Position just before the controls area returns HTCAPTION."""
+        boundary = 1000 - TITLE_BAR_CONTROLS_WIDTH
+        assert classify_hit(boundary - 1, 10, 1000, 620) == HTCAPTION
 
     def test_left_border_takes_priority_over_title_bar(self):
-        """Left border zone takes priority over title bar (pos_x <= BORDER)."""
+        """Left border zone takes priority over title bar (pos_x < BORDER)."""
         # pos_x=3 is within BORDER=4, even though pos_y=10 is in title bar
         assert classify_hit(3, 10, 1000, 620) == HTLEFT
 
     def test_controls_boundary_exact(self):
-        """Exact controls boundary (x=940 = 1000-60) returns 0 (in controls)."""
-        assert classify_hit(940, 10, 1000, 620) == 0
+        """The exact controls boundary returns client handling."""
+        assert classify_hit(1000 - TITLE_BAR_CONTROLS_WIDTH, 10, 1000, 620) == 0
 
     def test_title_bar_boundary_exact(self):
-        """Exact title bar boundary (y=35) falls through (not < 35)."""
-        assert classify_hit(500, 35, 1000, 620) == 0
+        """The exact 34-pixel title boundary falls through to the page."""
+        assert classify_hit(500, TITLE_BAR_HEIGHT, 1000, 620) == 0

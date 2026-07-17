@@ -1,6 +1,5 @@
-// Theme tokens + context for Virelo.
-// Exposes: ThemeProvider, useTheme, useTokens.
-// Tweakable knobs (theme, accent, density, radius, sidebarMode) live here.
+// This module provides Virelo's theme tokens and React context. Theme, accent,
+// density, radius, and sidebar mode remain configurable through `tweaks`.
 
 import React from "react";
 
@@ -46,7 +45,8 @@ const LIGHT = {
   borderHi: "#D9D4CA",
   text: "#1C1A16",
   textDim: "#6C6760",
-  textMuted: "#9A948B",
+  textMuted: "#746E66",
+  dangerText: "#B54132",
   hover: "rgba(0,0,0,0.04)",
   track: "#E3DED4",
   shadow: "0 1px 1px rgba(0,0,0,0.02)",
@@ -62,7 +62,8 @@ const DARK = {
   borderHi: "rgba(255,255,255,0.12)",
   text: "#ECECEE",
   textDim: "#9B9BA3",
-  textMuted: "#6B6B74",
+  textMuted: "#8F8F98",
+  dangerText: "#E97162",
   hover: "rgba(255,255,255,0.05)",
   track: "rgba(255,255,255,0.08)",
   shadow: "0 1px 1px rgba(0,0,0,0.3)",
@@ -126,10 +127,15 @@ function ThemeProvider({ tweaks, setTweaks, children }) {
 }
 
 function useTheme() {
-  return React.useContext(ThemeCtx);
+  const context = React.useContext(ThemeCtx);
+  if (!context) {
+    throw new Error("useTheme must be used within ThemeProvider.");
+  }
+  return context;
 }
+
 function useTokens() {
-  return React.useContext(ThemeCtx).tokens;
+  return useTheme().tokens;
 }
 
 export {

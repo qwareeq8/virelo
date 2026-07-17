@@ -15,6 +15,7 @@ def test_try_start_fails_while_active():
     """Second try_start without finish should fail."""
     guard = CaptureGuard()
     assert guard.try_start() is True
+    assert guard.is_active is True
     assert guard.try_start() is False
 
 
@@ -23,6 +24,7 @@ def test_finish_allows_restart():
     guard = CaptureGuard()
     guard.try_start()
     guard.finish()
+    assert guard.is_active is False
     assert guard.try_start() is True
 
 
