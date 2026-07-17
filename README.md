@@ -1,39 +1,78 @@
 # Virelo
 
-A personal Windows desktop utility that snaps windows to configurable sizes and auto-sizes File Explorer columns.
+A personal Windows desktop utility that snaps windows to configurable sizes and autosizes File
+Explorer columns.
 
 ## What It Does
 
 Virelo provides two core features:
 
-1. **Window Snap** -- A multi-press keyboard shortcut snaps the foreground window to a configurable size and position, centered on the current monitor. Press the shortcut again to restore the window to its original dimensions.
+1. **Window Snap:** A multi-press keyboard shortcut snaps the foreground window to a configurable
+   size and position, centered on the current monitor. Windows that cannot resize cleanly are
+   centered at their current size. Press the shortcut again to restore the window to its original
+   dimensions.
 
-2. **Explorer Column Auto-Size** -- Automatically sizes File Explorer Detail view columns when navigating between folders, eliminating the need to manually adjust column widths.
+2. **Explorer Column Autosize:** Automatically sizes File Explorer Details-view columns when
+   navigating between folders, eliminating the need to adjust column widths manually.
 
 ## Requirements
 
-- **Windows 10/11 x64 only** -- Virelo uses Win32 APIs, COM automation, and Windows-specific system features.
-- **Administrator privileges** -- The application auto-elevates at launch via UAC prompt. Admin access is required for global keyboard hooks and window manipulation across processes.
-- **Personal-use software** -- Built for the author's daily workflow. No telemetry, no accounts, no auto-updates.
+- **Windows 10 version 1809 or later on x64, or Windows 11 ARM64:** Native ARM64 and x64 builds
+  are separate. The x64 build also runs through Windows 11 ARM64 x64 emulation.
+- **Administrator privileges:** The application auto-elevates at launch through a UAC prompt.
+  Administrator access is required for global keyboard hooks and cross-process window
+  manipulation.
+- **Personal-use software:** Virelo is built for the author's daily workflow. It has no telemetry,
+  accounts, or automatic updates.
 
 ## Build from Source
 
 ### Prerequisites
 
-- Python 3.12+
-- Node.js (for frontend build)
-- Inno Setup 6 (only needed for the installer)
+- Official CPython 3.12 or newer that matches the payload architecture.
+- Node.js 24 LTS that matches the payload architecture.
+- Inno Setup 6.7.3, which is needed only for the installer.
 
-### Build Steps
+Do not use a Conda or Miniforge interpreter for a release build. A virtual environment retains
+the interpreter architecture and distribution that created it.
+
+### x64 Build
 
 ```powershell
-scripts/bootstrap.ps1        # Create .venv + install Python deps
-scripts/build-frontend.ps1   # Build React frontend
-scripts/build-app.ps1        # PyInstaller -> dist/Virelo/Virelo.exe
-scripts/build-installer.ps1  # Inno Setup -> installer/dist/VireloSetup.exe
+$python = "C:\Path\To\Official-x64-Python\python.exe"
+$node = "C:\Path\To\Official-x64-Node\node.exe"
+.\scripts\bootstrap.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\build-installer.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\verify-release.ps1 -Architecture x64
 ```
 
-Each script validates its preconditions and fails early with a clear error message if a required tool is missing.
+The bundle is written to `dist/x64/Virelo/`, and the installer is written to
+`installer/dist/VireloSetup-<version>-x64.exe`.
+
+### Native ARM64 Build
+
+Run this on Windows 11 ARM64 with a native ARM64 official CPython interpreter:
+
+```powershell
+$python = "C:\Path\To\Official-ARM64-Python\python.exe"
+$node = "C:\Path\To\Official-ARM64-Node\node.exe"
+.\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\build-installer.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\verify-release.ps1 -Architecture arm64
+```
+
+The bundle is written to `dist/arm64/Virelo/`, and the installer is written to
+`installer/dist/VireloSetup-<version>-arm64.exe`. PyInstaller does not cross-compile Windows
+payloads. The active Python process and native wheels determine the output architecture.
+
+Each release script validates its environment and fails when the requested architecture does
+not match Python or the packaged PE binaries. See [Building from Source](docs/BUILD.md) for the
+full preflight, smoke-test, and PE-verification commands.
+
+The supported distributable is the verified PyInstaller bundle or Inno Setup installer. The
+bootstrap uses an editable Python installation for source development; an ordinary non-editable
+wheel is not an end-user Virelo distribution because the generated React frontend is assembled by
+the Windows release pipeline.
 
 ## Development Mode
 
@@ -45,29 +84,36 @@ cd frontend
 npm run dev
 ```
 
-In a separate terminal:
+In a separate terminal, use the selected development environment:
 
 ```powershell
-python main.py
+.venv-x64\Scripts\python.exe main.py
 ```
 
-The frontend hot-reloads from `localhost:5173`. Changes to React components appear immediately without restarting the Python backend.
+The frontend hot-reloads from `localhost:5173`. Changes to React components appear immediately
+without restarting the Python backend.
 
 ## Architecture
 
-Virelo uses a Python/PySide6 backend that hosts a React frontend inside a QWebEngineView. The two layers communicate through QWebChannel:
+Virelo uses a Python/PySide6 backend that hosts a React frontend inside a QWebEngineView. The two
+layers communicate through QWebChannel:
 
-- **Python backend** -- Owns all OS-level logic: window management, keyboard hooks, COM automation, system tray, settings persistence (Windows Registry via QSettings).
-- **React frontend** -- Renders the settings UI, theme controls, and command palette inside the embedded Chromium browser.
-- **QWebChannel bridge** -- A single `VireloBridge` QObject is the sole communication channel. All data crosses the bridge as JSON strings.
+- **Python backend:** Owns all operating-system logic, including window management, keyboard hooks,
+  COM automation, the system tray, and settings persistence through QSettings.
+- **React frontend:** Renders the settings UI, theme controls, and command palette inside the
+  embedded Chromium browser.
+- **QWebChannel bridge:** Uses one `VireloBridge` QObject as the communication channel. All data
+  crosses the bridge as JSON strings.
 
-In release mode, the frontend is built to static files (`frontend/dist/`) and loaded via `file://` URL. In dev mode, it connects to the Vite dev server.
+In release mode, the frontend is built as static files under `frontend/dist/` and loaded through a
+`file:` URL. In development mode, it connects to the Vite development server.
 
 ## Documentation
 
-- [Building from Source](docs/BUILD.md) -- Full build pipeline, development mode, version management
-- [Troubleshooting](docs/TROUBLESHOOTING.md) -- Common build and runtime issues with fixes
-- [Release Checklist](docs/RELEASE.md) -- Step-by-step release process
+- [Building from Source](docs/BUILD.md): Full build pipeline, development mode, and version
+  management.
+- [Troubleshooting](docs/TROUBLESHOOTING.md): Common build and runtime issues with fixes.
+- [Release Checklist](docs/RELEASE.md): Step-by-step release process.
 
 ## Status
 

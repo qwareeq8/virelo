@@ -1,86 +1,183 @@
-# Virelo Release Checklist
+# Virelo Windows Release Checklist
 
-## Pre-Release
+This checklist validates local unsigned artifacts. It does not authorize a commit, push, tag,
+release, or remote change.
 
-1. **Update version** in `virelo/app/config.py`:
-   ```python
-   APP_VERSION = "x.y.z"
-   ```
-   This is the single source of truth. Build scripts propagate it automatically.
+## Release Matrix
 
-2. **Sync frontend version**:
+| Target | Native operating system | Process architecture | Expected payload | Required result |
+| --- | --- | --- | --- | --- |
+| x64 | x64 Windows 11 | x64 | x64 | Build, install, smoke test, and launch |
+| x64 fallback | ARM64 Windows 11 | x64 emulation | x64 | Installer is allowed and application launches |
+| ARM64 native | ARM64 Windows 11 | ARM64 | ARM64 | Build, install, smoke test, and launch |
+
+GitHub Actions builds, installs, smoke-tests, and uninstalls the x64 and native
+`windows-11-arm` packages, then separately installs the x64 package under ARM64 emulation.
+Physical Surface testing remains required for the
+interactive Windows features listed below.
+
+## Preflight
+
+1. Use a normal, non-administrator PowerShell terminal.
+2. Confirm the working tree and intended version without changing them:
+
    ```powershell
-   cd frontend
-   npm version x.y.z --no-git-tag-version
+   git status --short
+   .venv-x64\Scripts\python.exe -c "from virelo.app.config import APP_VERSION; print(APP_VERSION)"
    ```
 
-3. **Verify versions match**:
+3. Confirm the operating system, PowerShell, Python, and Node process architectures:
+
    ```powershell
-   # CI also checks this automatically
-   python -c "import re, json; py=re.search(r'APP_VERSION\s*=\s*\`"([^\`"]+)\`"', open('virelo/app/config.py').read()).group(1); js=json.load(open('frontend/package.json'))['version']; assert py==js, f'{py} != {js}'; print(f'Versions match: {py}')"
+   $python = ".venv-x64\Scripts\python.exe"
+   $node = "C:\Path\To\Official-x64-Node\node.exe"
+   [Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+   [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
+   & $python -c "import platform, struct, sys; print(sys.executable); print(sys.version); print(platform.machine()); print(struct.calcsize('P') * 8)"
+   & $node -p "JSON.stringify({execPath: process.execPath, arch: process.arch, version: process.version})"
    ```
 
-## Build
+   Use `.venv-arm64\Scripts\python.exe` and the native ARM64 Node executable when preparing the
+   native ARM64 target.
 
-4. **Clean previous build**:
+4. If the version or Python packaging metadata changed, rerun `.\scripts\bootstrap.ps1` for the
+   target architecture before building. Confirm the editable distribution metadata and frontend
+   versions match `APP_VERSION`:
+
    ```powershell
-   scripts/clean.ps1
+   .venv-x64\Scripts\python.exe -c "import importlib.metadata; print(importlib.metadata.version('virelo'))"
+   .venv-x64\Scripts\python.exe -c "from virelo.app.config import APP_VERSION; print(APP_VERSION)"
+   Get-Content frontend\package.json | ConvertFrom-Json | Select-Object -ExpandProperty version
    ```
 
-5. **Build installer** (runs entire pipeline):
+   Use `.venv-arm64` for a native ARM64 release.
+5. Retain the exact dependency inventory written by bootstrap. The constraints control third-party
+   Python package selection, but the selected CPython patch release and its bundled pip are also
+   part of the recorded build environment; the process is auditable, not bit-for-bit hermetic.
+
    ```powershell
-   scripts/build-installer.ps1
+   .venv-x64\Scripts\python.exe -m pip freeze --all
+   Get-Content build\x64\pip-freeze.txt
    ```
 
-6. **Run smoke test**:
+   Use the ARM64 paths for a native ARM64 release.
+6. Run the full frontend audit and the production-only audit. Classify any finding before release:
+
    ```powershell
-   python -m virelo --smoke-test
+   Push-Location frontend
+   npm audit
+   npm audit --omit=dev
+   Pop-Location
    ```
 
-7. **Run release verification**:
-   ```powershell
-   scripts/verify-release.ps1
-   ```
+## Build x64
 
-   This checks:
-   - `dist/Virelo/Virelo.exe` exists
-   - `installer/dist/VireloSetup.exe` exists
-   - `Virelo.spec` exists
-   - No stale legacy naming from before the rename
-   - Version in `config.py` matches `frontend/package.json`
-   - Version regex in `Virelo.spec` parses the same version from `config.py`
-   - Installed package version matches `config.py` (skipped with a warning if `.venv` is absent)
-   - Bundled `icon.ico` exists in `dist/Virelo/_internal/`
-   - Bundled `frontend/dist/index.html` exists in `dist/Virelo/_internal/`
-   - No stale naming in `dist/` output
+Run on x64 Windows, or in x64 emulation on Windows 11 ARM64:
 
-## Post-Build Verification
+```powershell
+$python = "C:\Path\To\Official-x64-Python\python.exe"
+$node = "C:\Path\To\Official-x64-Node\node.exe"
+.\scripts\bootstrap.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\build-installer.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\verify-release.ps1 -Architecture x64
+```
 
-8. **Manual verification**:
-   - Launch `dist/Virelo/Virelo.exe`
-   - Verify window dragging works (drag from title bar)
-   - Verify window resizing works (drag from edges/corners)
-   - Verify minimize and close buttons work
-   - Verify snap functionality with configured hotkey
-   - Verify settings save/load cycle
-   - Verify system tray icon and menu
+Expected outputs:
 
-9. **Installer verification**:
-   - Run `installer/dist/VireloSetup.exe`
-   - Complete installation
-   - Launch from Start Menu shortcut
-   - Verify same functionality as step 8
+- `dist/x64/Virelo/Virelo.exe`
+- `build/x64/Virelo/warn-Virelo.txt`
+- `build/x64/Virelo/xref-Virelo.html`
+- `installer/dist/VireloSetup-<version>-x64.exe`
 
-## Release
+## Build Native ARM64
 
-10. **Commit and tag**:
-    ```powershell
-    git add -A
-    git commit -m "release: vx.y.z"
-    git tag vx.y.z
-    ```
+Run only in native ARM64 PowerShell on Windows 11 ARM64:
 
-11. **Push**:
-    ```powershell
-    git push origin main --tags
-    ```
+```powershell
+$python = "C:\Path\To\Official-ARM64-Python\python.exe"
+$node = "C:\Path\To\Official-ARM64-Node\node.exe"
+.\scripts\bootstrap.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\build-installer.ps1 -Architecture arm64 -PythonExecutable $python -NodeExecutable $node
+.\scripts\verify-release.ps1 -Architecture arm64
+```
+
+Expected outputs:
+
+- `dist/arm64/Virelo/Virelo.exe`
+- `build/arm64/Virelo/warn-Virelo.txt`
+- `build/arm64/Virelo/xref-Virelo.html`
+- `installer/dist/VireloSetup-<version>-arm64.exe`
+
+## Required Automated Evidence
+
+For each target, retain the architecture, dependency, smoke, and PyInstaller reports produced
+under `build/<architecture>/`. Confirm all of the following:
+
+- The isolated PySide6 and pywin32/comtypes import preflights pass.
+- `python-constraints.json` proves that every installed third-party package has an exact matching
+  constraint and that no stale constraint remains.
+- Python and pip report the intended process and wheel architecture.
+- No Qt, ICU, OpenSSL, Python, or VC runtime dependency resolves from Conda, Miniforge, or an
+  unrelated tool installation.
+- PyInstaller's PySide6 Qt information probe succeeds.
+- `qwindows.dll`, `QtWebEngineProcess.exe`, WebEngine resources, WebEngine locales, required Qt
+  DLLs, and PySide/Shiboken extensions exist in the final bundle.
+- PE verification matches the target for Python, the Python DLL, `QtCore.pyd`, `Qt6Core.dll`,
+  `QtWebEngineProcess.exe`, `pythoncom`, `pywintypes`, `Virelo.exe`, and all recursively scanned
+  loadable payload binaries.
+- The source and frozen smoke reports both succeed.
+- The installer filename contains the version and architecture, and its source tree matches the
+  declared architecture.
+- `Virelo.exe` and the installer embed file and product versions matching `APP_VERSION`.
+- The frozen bundle and installer contain the repository's `LICENSE` file.
+
+Inspect `warn-Virelo.txt`, `xref-Virelo.html`, the analysis table of contents, and `_internal`.
+Document Windows API-set and operating-system DLL warnings as benign only after confirming the
+supported Windows versions supply them. Treat missing non-system dependencies and unrelated DLL
+search-path resolutions as actionable.
+
+## Physical Surface Checklist
+
+Run both the native ARM64 installer and, separately, the x64 installer on a current Windows 11
+ARM64 Surface. Do not install one over an unverified running copy of the other.
+
+- Launch the installer. Confirm the ARM64 installer is accepted only on ARM64 Windows and the x64
+  installer is accepted through x64 emulation.
+- Launch Virelo and confirm the expected UAC prompt occurs once per launch, without an elevation
+  loop during `--smoke-test`.
+- In Task Manager, add the **Architecture** column and confirm the native installation reports
+  `ARM64`, while the fallback installation reports `x64`.
+- Confirm the main window, system tray icon, tray menu, minimize behavior, and exit behavior.
+- Capture and use the configured global hotkey.
+- Snap and restore ordinary resizable windows.
+- Test windows owned by `GoogleDriveFS.exe` and `LightBulb.exe`. Confirm Virelo always centers
+  those known resize-hostile windows at their current size without first requesting a resize. Also
+  test an otherwise resizable window that rejects or alters a requested size, and confirm Virelo
+  restores its original size before centering it.
+- Test monitors with different scaling values and, when available, a monitor left of or above the
+  primary display. Confirm centering, resizing, and restore geometry at each DPI.
+- Open several File Explorer directories in Details view and confirm all visible columns autosize.
+  Include local, network, cloud-backed, empty, and long-filename folders where available.
+- Apply and reset the default folder view only after file copies, moves, and deletions finish. If
+  testing over-the-shoulder UAC with another administrator's credentials, confirm Virelo refuses
+  the per-user registry change instead of writing the administrator profile.
+- Enable **Run at startup**, sign out and back in, and confirm the per-user startup shortcut starts
+  Virelo. Leave it enabled for the uninstall trial and confirm a normal same-account UAC uninstall
+  removes that account's startup shortcut before deleting the application.
+- Uninstall silently and interactively in separate trials. Confirm application files, Start menu
+  shortcuts, and the optional common desktop shortcut are removed. Confirm per-user settings and
+  Explorer recovery backups remain available as intended. Also test over-the-shoulder elevation,
+  if available, and record that Inno Setup cannot execute uninstall cleanup as the original user;
+  the original profile's startup link then requires manual removal.
+- Reinstall the opposite architecture and repeat the smoke test to detect stale mixed-architecture
+  files.
+
+Record the Windows build number, Surface model, display topology and scaling, installer SHA-256,
+test time, Task Manager architecture result, and pass/fail result for every checklist item.
+
+## Release Boundary
+
+An Inno Setup or PyInstaller zero exit code is only one input. Do not release when an import hook,
+runtime load, required-file check, PE scan, source smoke test, frozen smoke test, or installer gate
+fails. A smoke process that exceeds the 120-second outer timeout is a failure even if it wrote a
+partial report. Do not rename an x64-emulated artifact to ARM64.
