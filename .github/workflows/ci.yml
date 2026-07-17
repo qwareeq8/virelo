@@ -180,12 +180,10 @@ jobs:
           if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
             throw "The pinned Inno Setup compiler was not installed at $iscc."
           }
-          $compilerVersion = (Get-Item -LiteralPath $iscc).VersionInfo.ProductVersion.Trim()
-          if ($compilerVersion -notmatch '^6\.7\.3(?:\D|$)') {
-            throw "Expected Inno Setup 6.7.3; found $compilerVersion at $iscc."
-          }
+          # ISCC.exe does not expose a usable PE version. build-installer.ps1
+          # actively probes the compiler engine before packaging.
           "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Inno Setup ${compilerVersion}: $iscc."
+          Write-Host "Installed the pinned Inno Setup compiler at $iscc."
       - name: Report native operating-system and process architectures
         shell: pwsh
         run: |

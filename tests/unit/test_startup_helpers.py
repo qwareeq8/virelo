@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from virelo.platform.startup import ensure_dispatch, select_pythonw_executable
 
 
@@ -88,6 +90,7 @@ def test_ensure_dispatch_recovers_from_corrupt_generated_cache(monkeypatch, tmp_
     ensure.assert_called_once_with("WScript.Shell")
 
 
+@pytest.mark.requires_qt
 def test_startup_reconciliation_reports_saved_but_unsynchronized_state(monkeypatch) -> None:
     """A failed shortcut update is reported accurately and retried on the next launch."""
     from virelo.app import window as window_module

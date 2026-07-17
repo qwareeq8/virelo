@@ -1,4 +1,4 @@
-"""Use installed native modules, with test stubs only when they are unavailable."""
+"""Use installed native modules on Windows and test stubs on other platforms."""
 
 import importlib
 import importlib.util
@@ -7,7 +7,7 @@ import types
 from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
-# Stub native modules that are not available in CI / system Python.
+# Stub native modules outside Windows or when unavailable in system Python.
 # This must happen BEFORE any virelo.* imports so that transitive imports
 # through __init__.py files do not fail with ModuleNotFoundError.
 # ---------------------------------------------------------------------------
@@ -33,7 +33,7 @@ _MISSING_NATIVE_ROOTS = {
 for mod_name in _NATIVE_STUBS:
     if mod_name not in sys.modules:
         root = mod_name.partition(".")[0]
-        if root not in _MISSING_NATIVE_ROOTS:
+        if sys.platform == "win32" and root not in _MISSING_NATIVE_ROOTS:
             # Use installed native packages on Windows so ABI and integration
             # tests cannot silently pass against mocks. Import failures from an
             # installed but broken package are deliberately not suppressed.
@@ -56,6 +56,7 @@ for mod_name in _NATIVE_STUBS:
             stub.Signal = lambda *a, **kw: MagicMock()
             stub.Slot = lambda *a, **kw: lambda f: f
             stub.Property = lambda *a, **kw: property(lambda self: None)
+            stub.QTimer = types.SimpleNamespace(singleShot=MagicMock())
         sys.modules[mod_name] = stub
 
 # Stub win32 modules with enough constants for win32_helpers.py to load

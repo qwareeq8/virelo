@@ -43,6 +43,7 @@ LOG = logging.getLogger("Virelo")
 
 REG_EXPORT_TIMEOUT_SECONDS = 15
 TASKKILL_TIMEOUT_SECONDS = 10
+_CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Registry paths, all relative to HKCU unless noted otherwise.
 SHELL_CLASSES = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell"
@@ -330,7 +331,7 @@ def _backup_registry_state() -> str:
                     "/reg:64",
                 ],
                 capture_output=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
                 check=False,
                 timeout=REG_EXPORT_TIMEOUT_SECONDS,
             )
@@ -436,7 +437,7 @@ def _create_process_with_token(token: HANDLE, application: str, command_line: st
         0,
         application,
         mutable_command,
-        subprocess.CREATE_NO_WINDOW,
+        _CREATE_NO_WINDOW,
         None,
         None,
         ctypes.byref(startup),
@@ -506,7 +507,7 @@ def _schedule_shell_recovery(token: HANDLE | None, previous_pid: int, explorer: 
                 "-Command",
                 script,
             ],
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=_CREATE_NO_WINDOW,
             close_fds=True,
         )
     except OSError:
@@ -634,7 +635,7 @@ def restart_explorer() -> bool:
                 "explorer.exe",
             ],
             capture_output=True,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=_CREATE_NO_WINDOW,
             check=False,
             timeout=TASKKILL_TIMEOUT_SECONDS,
         )

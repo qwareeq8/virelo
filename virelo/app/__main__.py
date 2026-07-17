@@ -113,7 +113,11 @@ def _remove_current_user_startup_shortcut() -> int:
         return 1
     shortcut = os.path.join(
         appdata,
-        r"Microsoft\Windows\Start Menu\Programs\Startup",
+        "Microsoft",
+        "Windows",
+        "Start Menu",
+        "Programs",
+        "Startup",
         f"{APP_NAME}.lnk",
     )
     try:
