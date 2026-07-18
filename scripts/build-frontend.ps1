@@ -134,6 +134,16 @@ try {
                 -Encoding utf8
 
             if (-not $InstallOnly) {
+                Write-Host "[build-frontend] Checking frontend formatting and lint..."
+                & $npm run format:check
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Frontend formatting check failed."
+                }
+                & $npm run lint
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Frontend lint failed."
+                }
+
                 if (-not $SkipTests) {
                     Write-Host "[build-frontend] Running frontend tests..."
                     & $npm test

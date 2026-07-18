@@ -37,30 +37,27 @@ describe("CommandPalette", () => {
     renderPalette();
     const input = screen.getByRole("combobox", { name: "Search commands" });
     expect(input).toBeInTheDocument();
-    expect(
-      screen.getByRole("dialog", { name: "Command palette" }),
-    ).toContainElement(input);
+    expect(screen.getByRole("dialog", { name: "Command palette" })).toContainElement(input);
     expect(screen.getByRole("listbox", { name: "Commands" })).toBeVisible();
     expect(screen.getAllByRole("option").length).toBeGreaterThan(10);
   });
 
   it("Shows all commands when no filter is applied.", () => {
     renderPalette();
-    expect(
-      screen.getByRole("option", { name: "Go to Window snap" }),
-    ).toBeVisible();
-    expect(
-      screen.getByRole("option", { name: "Go to Explorer" }),
-    ).toBeVisible();
+    expect(screen.getByRole("option", { name: "Go to Window snap" })).toBeVisible();
+    expect(screen.getByRole("option", { name: "Go to Explorer" })).toBeVisible();
     expect(screen.getByRole("option", { name: /Test snap/ })).toBeVisible();
     expect(screen.getByRole("option", { name: "Save changes" })).toBeVisible();
   });
 
   it("Does not offer Save when there are no unsaved changes.", () => {
     renderPalette({ app: { unsaved: false } });
-    expect(
-      screen.queryByRole("option", { name: "Save changes" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Save changes" })).not.toBeInTheDocument();
+  });
+
+  it("Does not offer Save while a save is already in progress.", () => {
+    renderPalette({ app: { unsaved: true, saving: true } });
+    expect(screen.queryByRole("option", { name: "Save changes" })).not.toBeInTheDocument();
   });
 
   it("Filters commands when typing a search query.", async () => {
@@ -69,15 +66,9 @@ describe("CommandPalette", () => {
     const input = screen.getByRole("combobox", { name: "Search commands" });
     await user.type(input, "snap");
     expect(screen.getByRole("option", { name: /Test snap/ })).toBeVisible();
-    expect(
-      screen.getByRole("option", { name: "Go to Window snap" }),
-    ).toBeVisible();
-    expect(
-      screen.queryByRole("option", { name: "Go to Explorer" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("option", { name: "Go to About" }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Go to Window snap" })).toBeVisible();
+    expect(screen.queryByRole("option", { name: "Go to Explorer" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Go to About" })).not.toBeInTheDocument();
   });
 
   it("Shows a no-results message for an unmatched filter.", async () => {
@@ -85,16 +76,12 @@ describe("CommandPalette", () => {
     const user = userEvent.setup();
     const input = screen.getByRole("combobox", { name: "Search commands" });
     await user.type(input, "zzzznonexistent");
-    expect(screen.getByRole("status")).toHaveTextContent(
-      'No results for "zzzznonexistent".',
-    );
+    expect(screen.getByRole("status")).toHaveTextContent('No results for "zzzznonexistent".');
   });
 
   it("Does not render when open is false.", () => {
     renderPalette({ open: false });
-    expect(
-      screen.queryByRole("dialog", { name: "Command palette" }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Command palette" })).not.toBeInTheDocument();
   });
 
   it("Highlights the hovered item instead of the last item.", async () => {
@@ -134,17 +121,12 @@ describe("CommandPalette", () => {
     const onClose = vi.fn();
     renderPalette({ onClose });
     const user = userEvent.setup();
-    await user.type(
-      screen.getByRole("combobox", { name: "Search commands" }),
-      "zzzznonexistent",
-    );
+    await user.type(screen.getByRole("combobox", { name: "Search commands" }), "zzzznonexistent");
 
     await user.keyboard("{Enter}");
 
     expect(onClose).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("dialog", { name: "Command palette" }),
-    ).toBeVisible();
+    expect(screen.getByRole("dialog", { name: "Command palette" })).toBeVisible();
   });
 
   it("Does not execute a command for a modified Enter key.", async () => {

@@ -45,7 +45,7 @@ describe("bridgeToState", () => {
     expect(result.width).toBe(76);
     expect(result.height).toBe(76);
     expect(result.gameMode).toBe(true);
-    expect(result.autoSize).toBe(true);
+    expect(result.autoSize).toBe(false);
     expect(result.launchLogin).toBe(false);
   });
 
@@ -129,22 +129,17 @@ function makeBridge() {
     snap_status: signal(),
     capture_status: signal(),
     views_status: signal(),
-    save_settings: vi.fn((json, transactionId, cb) =>
-      cb(JSON.stringify({ ok: true })),
-    ),
-    commit_draft: vi.fn((transactionId, cb) =>
-      cb(JSON.stringify({ ok: true })),
-    ),
-    discard_draft: vi.fn((transactionId, cb) =>
-      cb(JSON.stringify({ ok: true })),
-    ),
-    reset_defaults: vi.fn((transactionId, cb) =>
-      cb(JSON.stringify({ ok: true, data: {} })),
-    ),
+    save_settings: vi.fn((json, transactionId, cb) => cb(JSON.stringify({ ok: true }))),
+    commit_draft: vi.fn((transactionId, cb) => cb(JSON.stringify({ ok: true }))),
+    discard_draft: vi.fn((transactionId, cb) => cb(JSON.stringify({ ok: true }))),
+    reset_defaults: vi.fn((transactionId, cb) => cb(JSON.stringify({ ok: true, data: {} }))),
     test_snap: vi.fn(),
     capture_key: vi.fn((target, cb) => cb(JSON.stringify({ ok: true }))),
     cancel_capture: vi.fn((cb) => cb(JSON.stringify({ ok: true }))),
     set_modal_open: vi.fn((isOpen, cb) => cb(JSON.stringify({ ok: true }))),
+    set_hit_test_regions: vi.fn((interactiveWidth, controlsWidth, titleBarHeight, cb) =>
+      cb(JSON.stringify({ ok: true })),
+    ),
     setWindowCommand: vi.fn(),
   };
 }
@@ -286,9 +281,7 @@ describe("throttled draft writes versus save, discard, and reset", () => {
     // Navigate to General and confirm the reset dialog.
     fireEvent.click(screen.getByRole("button", { name: "General" }));
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
-    fireEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", { name: "Reset" }),
-    );
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Reset" }));
     await flushOperations();
     expect(bridge.reset_defaults).toHaveBeenCalledTimes(1);
     // The queued write is dropped, so it cannot overwrite the defaults.
@@ -299,11 +292,10 @@ describe("throttled draft writes versus save, discard, and reset", () => {
   });
 
   it("Keeps dirty state when the final draft write fails.", async () => {
+    vi.useFakeTimers();
     const bridge = makeBridge();
     bridge.save_settings
-      .mockImplementationOnce((json, transactionId, cb) =>
-        cb(JSON.stringify({ ok: true })),
-      )
+      .mockImplementationOnce((json, transactionId, cb) => cb(JSON.stringify({ ok: true })))
       .mockImplementationOnce((json, transactionId, cb) =>
         cb(JSON.stringify({ ok: false, error: "write rejected" })),
       );
@@ -316,9 +308,139 @@ describe("throttled draft writes versus save, discard, and reset", () => {
 
     expect(bridge.commit_draft).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "Save failed: write rejected",
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Save failed: write rejected");
+    expect(alert).toHaveAttribute("title", "Save failed: write rejected");
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(alert).toBeInTheDocument();
+  });
+
+  it("Recovers the settings queue when a bridge callback is lost.", async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge();
+    bridge.save_settings
+      .mockImplementationOnce(() => {})
+      .mockImplementation((json, transactionId, callback) =>
+        callback(JSON.stringify({ ok: true })),
+      );
+    renderApp(bridge);
+
+    fireEvent.click(screen.getAllByRole("switch")[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(bridge.commit_draft).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await flushOperations();
+
+    expect(bridge.save_settings).toHaveBeenCalledTimes(2);
+    expect(bridge.commit_draft).toHaveBeenCalledTimes(1);
+  });
+
+  it("Prevents duplicate explicit saves in the same event turn.", async () => {
+    const bridge = makeBridge();
+    renderApp(bridge);
+    fireEvent.click(screen.getAllByRole("switch")[1]);
+    await flushOperations();
+
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "s", ctrlKey: true, bubbles: true, cancelable: true }),
+      );
+    });
+    await flushOperations();
+
+    expect(bridge.commit_draft).toHaveBeenCalledTimes(1);
+  });
+
+  it("Keeps save and discard unavailable while a commit is pending.", async () => {
+    const bridge = makeBridge();
+    let finishCommit;
+    bridge.commit_draft.mockImplementation((transactionId, callback) => {
+      finishCommit = callback;
+    });
+    renderApp(bridge);
+    fireEvent.click(screen.getAllByRole("switch")[1]);
+    await flushOperations();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await flushOperations();
+
+    expect(screen.getByRole("button", { name: "Discard" })).toBeDisabled();
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    const palette = screen.getByRole("dialog", { name: "Command palette" });
+    expect(within(palette).queryByRole("option", { name: "Save changes" })).not.toBeInTheDocument();
+
+    act(() => finishCommit(JSON.stringify({ ok: true })));
+    await flushOperations();
+  });
+
+  it("Ignores a late tagged echo after its bridge callback times out.", async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge();
+    bridge.save_settings
+      .mockImplementationOnce(() => {})
+      .mockImplementation((json, transactionId, callback) =>
+        callback(JSON.stringify({ ok: true })),
+      );
+    renderApp(bridge);
+    const gameMode = screen.getAllByRole("switch")[1];
+
+    fireEvent.click(gameMode);
+    await flushOperations();
+    const timedOutTransaction = bridge.save_settings.mock.calls[0][1];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await flushOperations();
+    fireEvent.click(gameMode);
+    await flushOperations();
+
+    const onSettingsChanged = bridge.settings_changed.connect.mock.calls[0][0];
+    act(() =>
+      onSettingsChanged(
+        JSON.stringify({
+          game_mode_enabled: false,
+          __vireloTransaction: timedOutTransaction,
+        }),
+      ),
     );
+
+    expect(gameMode).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
+  });
+
+  it("Ignores a late tagged echo after successful-callback cleanup.", async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge();
+    renderApp(bridge);
+    const gameMode = screen.getAllByRole("switch")[1];
+
+    fireEvent.click(gameMode);
+    await flushOperations();
+    const cleanedTransaction = bridge.save_settings.mock.calls[0][1];
+    fireEvent.click(gameMode);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    await flushOperations();
+
+    const onSettingsChanged = bridge.settings_changed.connect.mock.calls[0][0];
+    act(() =>
+      onSettingsChanged(
+        JSON.stringify({
+          game_mode_enabled: false,
+          __vireloTransaction: cleanedTransaction,
+        }),
+      ),
+    );
+
+    expect(gameMode).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeEnabled();
   });
 
   it("Keeps a newer edit dirty when an earlier commit finishes.", async () => {
@@ -351,27 +473,16 @@ describe("throttled draft writes versus save, discard, and reset", () => {
     fireEvent.click(screen.getByRole("button", { name: "General" }));
     const onSettingsChanged = bridge.settings_changed.connect.mock.calls[0][0];
 
-    fireEvent.click(screen.getByRole("button", { name: "Light" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Light" }));
     await flushOperations();
-    fireEvent.click(screen.getByRole("button", { name: "System" }));
-    act(() =>
-      onSettingsChanged(
-        JSON.stringify({ theme: "light", game_mode_enabled: true }),
-      ),
-    );
-    act(() =>
-      onSettingsChanged(
-        JSON.stringify({ theme: "dark", game_mode_enabled: true }),
-      ),
-    );
+    fireEvent.click(screen.getByRole("radio", { name: "System" }));
+    act(() => onSettingsChanged(JSON.stringify({ theme: "light", game_mode_enabled: true })));
+    act(() => onSettingsChanged(JSON.stringify({ theme: "dark", game_mode_enabled: true })));
     act(() => vi.advanceTimersByTime(500));
     await flushOperations();
 
     expect(bridge.save_settings).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "Dark" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
   });
 
   it("Retains recoverability when discard fails with a trailing edit.", async () => {
@@ -413,6 +524,33 @@ describe("frontend lifecycle and temporary surfaces", () => {
     const minimize = screen.getByRole("button", { name: "Minimize Virelo" });
     expect(search.parentElement.style.width).toBe("320px");
     expect(minimize.parentElement.style.width).toBe("72px");
+    expect(minimize.style.height).toBe("34px");
+    expect(screen.getByRole("button", { name: "Close Virelo" }).style.height).toBe("34px");
+  });
+
+  it("Reports measured title-bar regions to the backend.", () => {
+    const original = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function getBoundingClientRect() {
+      const region = this.getAttribute?.("data-hit-test-region");
+      if (region === "titlebar") {
+        return { left: 0, right: 1000, top: 0, bottom: 34, width: 1000, height: 34 };
+      }
+      if (region === "interactive") {
+        return { left: 0, right: 319.2, top: 0, bottom: 34, width: 319.2, height: 34 };
+      }
+      if (region === "controls") {
+        return { left: 928.2, right: 1000, top: 0, bottom: 34, width: 71.8, height: 34 };
+      }
+      return original.call(this);
+    };
+    try {
+      const bridge = makeBridge();
+      renderApp(bridge);
+
+      expect(bridge.set_hit_test_regions).toHaveBeenCalledWith(320, 72, 34, expect.any(Function));
+    } finally {
+      Element.prototype.getBoundingClientRect = original;
+    }
   });
 
   it("Disconnects every bridge signal when the app unmounts.", () => {
@@ -427,9 +565,7 @@ describe("frontend lifecycle and temporary surfaces", () => {
       "capture_status",
       "views_status",
     ]) {
-      expect(bridge[name].disconnect).toHaveBeenCalledWith(
-        bridge[name].connect.mock.calls[0][0],
-      );
+      expect(bridge[name].disconnect).toHaveBeenCalledWith(bridge[name].connect.mock.calls[0][0]);
     }
   });
 
@@ -443,6 +579,48 @@ describe("frontend lifecycle and temporary surfaces", () => {
     act(() => vi.advanceTimersByTime(5000));
 
     expect(screen.getByText("Press a key...")).toBeInTheDocument();
+  });
+
+  it("Uses crisp, full-height window controls with a legible close hover.", () => {
+    const bridge = makeBridge();
+    renderApp(bridge);
+    const close = screen.getByRole("button", { name: "Close Virelo" });
+
+    expect(close.querySelector("svg")).toBeInTheDocument();
+    fireEvent.mouseEnter(close);
+    expect(close).toHaveStyle({ background: "#E81123", color: "#FFFFFF" });
+  });
+
+  it("Saves pending changes with Ctrl+S.", async () => {
+    const bridge = makeBridge();
+    renderApp(bridge);
+    fireEvent.click(screen.getAllByRole("switch")[1]);
+
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await flushOperations();
+
+    expect(bridge.commit_draft).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Save changes" })).toHaveAttribute(
+      "aria-keyshortcuts",
+      "Control+S",
+    );
+  });
+
+  it("Suppresses Ctrl+S while capture or a temporary surface is active.", async () => {
+    const bridge = makeBridge();
+    renderApp(bridge);
+    fireEvent.click(screen.getAllByRole("switch")[1]);
+    fireEvent.click(screen.getByRole("button", { name: "Snap key: SHIFT" }));
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await flushOperations();
+    expect(bridge.commit_draft).not.toHaveBeenCalled();
+
+    const onCaptureStatus = bridge.capture_status.connect.mock.calls[0][0];
+    act(() => onCaptureStatus("cancelled"));
+    fireEvent.keyDown(window, { key: "k", ctrlKey: true });
+    fireEvent.keyDown(window, { key: "s", ctrlKey: true });
+    await flushOperations();
+    expect(bridge.commit_draft).not.toHaveBeenCalled();
   });
 
   it("Cancels active key capture when the Snap page unmounts.", () => {
@@ -462,9 +640,8 @@ describe("frontend lifecycle and temporary surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "Snap key: SHIFT" }));
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
 
-    expect(
-      screen.queryByPlaceholderText(/search settings/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/search settings/i)).not.toBeInTheDocument();
+    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(true, expect.any(Function));
   });
 
   it("Does not open the command palette over a confirmation modal.", () => {
@@ -474,15 +651,10 @@ describe("frontend lifecycle and temporary surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "General" }));
     fireEvent.click(screen.getByRole("button", { name: "Reset" }));
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(
-      true,
-      expect.any(Function),
-    );
+    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(true, expect.any(Function));
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
 
-    expect(
-      screen.queryByPlaceholderText(/search settings/i),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/search settings/i)).not.toBeInTheDocument();
   });
 
   it("Guards native shortcuts while the command palette is open.", () => {
@@ -491,18 +663,10 @@ describe("frontend lifecycle and temporary surfaces", () => {
 
     fireEvent.keyDown(window, { key: "k", ctrlKey: true });
 
-    expect(
-      screen.getByRole("dialog", { name: "Command palette" }),
-    ).toBeVisible();
-    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(
-      true,
-      expect.any(Function),
-    );
+    expect(screen.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(true, expect.any(Function));
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(
-      false,
-      expect.any(Function),
-    );
+    expect(bridge.set_modal_open).toHaveBeenLastCalledWith(false, expect.any(Function));
   });
 
   it("Lets an immediate backend theme win while a tagged draft call is pending.", async () => {
@@ -515,32 +679,22 @@ describe("frontend lifecycle and temporary surfaces", () => {
     fireEvent.click(screen.getByRole("button", { name: "General" }));
     const onSettingsChanged = bridge.settings_changed.connect.mock.calls[0][0];
 
-    fireEvent.click(screen.getByRole("button", { name: "Light" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Light" }));
     await flushOperations();
     act(() => onSettingsChanged(JSON.stringify({ theme: "dark" })));
 
-    expect(screen.getByRole("button", { name: "Dark" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
     act(() => finishStage(JSON.stringify({ ok: true })));
     await flushOperations();
-    expect(screen.getByRole("button", { name: "Dark" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(screen.getByRole("radio", { name: "Dark" })).toHaveAttribute("aria-checked", "true");
   });
 
   it("Includes each key-capture purpose in its accessible name.", () => {
     const bridge = makeBridge();
     renderApp(bridge);
 
-    expect(
-      screen.getByRole("button", { name: "Snap key: SHIFT" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Restore key: CTRL" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Snap key: SHIFT" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore key: CTRL" })).toBeInTheDocument();
   });
 
   it("Disables Save until a change exists and reports successful saves.", async () => {

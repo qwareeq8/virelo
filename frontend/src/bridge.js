@@ -21,7 +21,7 @@ const MOCK_SETTINGS = {
   width_pct: 76,
   height_pct: 76,
   game_mode_enabled: true,
-  ex_auto_size: true,
+  ex_auto_size: false,
   run_at_startup: false,
   theme: "dark",
   accent: "slate",
@@ -30,17 +30,13 @@ const MOCK_SETTINGS = {
 };
 
 const MOCK_BRIDGE = {
-  get_settings: (callback) =>
-    callback(JSON.stringify({ ok: true, data: MOCK_SETTINGS })),
+  get_settings: (callback) => callback(JSON.stringify({ ok: true, data: MOCK_SETTINGS })),
   save_settings: (json, transactionId, callback) =>
     callback(JSON.stringify({ ok: true, applied: JSON.parse(json) })),
-  commit_draft: (transactionId, callback) =>
-    callback(JSON.stringify({ ok: true, applied: {} })),
-  discard_draft: (transactionId, callback) =>
-    callback(JSON.stringify({ ok: true })),
+  commit_draft: (transactionId, callback) => callback(JSON.stringify({ ok: true, applied: {} })),
+  discard_draft: (transactionId, callback) => callback(JSON.stringify({ ok: true })),
   has_draft: (callback) => callback(JSON.stringify({ ok: true, data: false })),
-  get_snap_enabled: (callback) =>
-    callback(JSON.stringify({ ok: true, data: true })),
+  get_snap_enabled: (callback) => callback(JSON.stringify({ ok: true, data: true })),
   test_snap: (callback) => callback(JSON.stringify({ ok: true })),
   capture_key: (target, callback) => callback(JSON.stringify({ ok: true })),
   cancel_capture: (callback) => callback(JSON.stringify({ ok: true })),
@@ -54,9 +50,9 @@ const MOCK_BRIDGE = {
         data: { mode: "dark", effective: "dark" },
       }),
     ),
-  get_launch_at_login: (callback) =>
-    callback(JSON.stringify({ ok: true, data: false })),
-  setWindowCommand: (command, callback) =>
+  get_launch_at_login: (callback) => callback(JSON.stringify({ ok: true, data: false })),
+  setWindowCommand: (command, callback) => callback(JSON.stringify({ ok: true })),
+  set_hit_test_regions: (interactiveWidth, controlsWidth, titleBarHeight, callback) =>
     callback(JSON.stringify({ ok: true })),
   apply_details_view: (callback) =>
     setTimeout(() => callback(JSON.stringify({ ok: true, data: {} })), 200),
@@ -91,8 +87,7 @@ function initBridge() {
     new QWebChannelConstructor(transport, (channel) => {
       bridgeInstance = channel.objects.bridge;
       if (!bridgeInstance) {
-        const message =
-          'QWebChannel did not expose the required "bridge" object.';
+        const message = 'QWebChannel did not expose the required "bridge" object.';
         if (!DEV_MODE) {
           reject(new Error(message));
           return;
@@ -132,15 +127,8 @@ export function getBridgeSync() {
 export function parseSettingsResult(rawResult) {
   const response = JSON.parse(rawResult);
   const data = response?.data;
-  if (
-    response?.ok !== true ||
-    data === null ||
-    typeof data !== "object" ||
-    Array.isArray(data)
-  ) {
-    throw new Error(
-      response?.error || "The backend did not return settings data.",
-    );
+  if (response?.ok !== true || data === null || typeof data !== "object" || Array.isArray(data)) {
+    throw new Error(response?.error || "The backend did not return settings data.");
   }
   return data;
 }

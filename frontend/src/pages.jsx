@@ -4,16 +4,7 @@
 
 import React from "react";
 import { useTokens, useTheme, ACCENTS } from "./theme.jsx";
-import {
-  Toggle,
-  Button,
-  Card,
-  Row,
-  Segmented,
-  Stepper,
-  Slider,
-  Kbd,
-} from "./primitives.jsx";
+import { Toggle, Button, Card, Row, Segmented, Stepper, Slider, Kbd } from "./primitives.jsx";
 import { Icon } from "./icons.jsx";
 
 // License text shown inline on the About page. Kept in sync with the
@@ -43,7 +34,7 @@ SOFTWARE.`;
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-function useModalFocus(open, onClose) {
+function useModalFocus(open, onClose, exitFocusRef = null) {
   const dialogRef = React.useRef(null);
   const returnFocusRef = React.useRef(null);
 
@@ -51,8 +42,7 @@ function useModalFocus(open, onClose) {
     if (!open) return undefined;
     returnFocusRef.current = document.activeElement;
     const dialog = dialogRef.current;
-    const focusable = () =>
-      Array.from(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || []);
+    const focusable = () => Array.from(dialog?.querySelectorAll(FOCUSABLE_SELECTOR) || []);
     (focusable()[0] || dialog)?.focus();
 
     const onKey = (event) => {
@@ -81,23 +71,18 @@ function useModalFocus(open, onClose) {
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("keydown", onKey);
+      const exitTarget = exitFocusRef?.current;
+      if (exitFocusRef) exitFocusRef.current = null;
       const previous = returnFocusRef.current;
-      if (previous?.isConnected) previous.focus();
+      if (exitTarget?.isConnected && !exitTarget.disabled) exitTarget.focus();
+      else if (previous?.isConnected && !previous.disabled) previous.focus();
     };
-  }, [onClose, open]);
+  }, [exitFocusRef, onClose, open]);
 
   return dialogRef;
 }
 
-function KeyCapture({
-  label,
-  value,
-  target,
-  bridge,
-  captureActive,
-  setCaptureActive,
-  showStatus,
-}) {
+function KeyCapture({ label, value, target, bridge, captureActive, setCaptureActive, showStatus }) {
   const t = useTokens();
   const [capturing, setCapturing] = React.useState(false);
   const btnRef = React.useRef(null);
@@ -170,13 +155,13 @@ function KeyCapture({
         if (!response.ok) {
           setCapturing(false);
           setCaptureActive?.(false);
-          showStatus?.(response.error || "Key capture could not start.", 3000);
+          showStatus?.(response.error || "Key capture could not start.", 3000, "error");
         }
       } catch (error) {
         console.error("[capture] Failed to parse capture response:", error);
         setCapturing(false);
         setCaptureActive?.(false);
-        showStatus?.("Key capture could not start.", 3000);
+        showStatus?.("Key capture could not start.", 3000, "error");
       }
     });
   };
@@ -216,7 +201,7 @@ function KeyCapture({
 function MonitorPreview({ width, height }) {
   const t = useTokens();
   const monitorWidth = 280;
-  const monitorHeight = 170;
+  const monitorHeight = 158;
   const monitorPadding = 12;
   const innerWidth = monitorWidth - monitorPadding * 2;
   const innerHeight = monitorHeight - monitorPadding * 2;
@@ -230,8 +215,7 @@ function MonitorPreview({ width, height }) {
   // the accent so the preview reflects the user's choice.
   const darkAccents = ["slate"];
   const { tweaks } = useTheme();
-  const rectColor =
-    !t.isDark && darkAccents.includes(tweaks.accent) ? "#8EC4FF" : t.accent;
+  const rectColor = !t.isDark && darkAccents.includes(tweaks.accent) ? "#8EC4FF" : t.accent;
   const monitorBg = t.isDark ? "#0C0C0E" : "#3B3833";
 
   return (
@@ -258,7 +242,7 @@ function MonitorPreview({ width, height }) {
             letterSpacing: 0.3,
           }}
         >
-          {width}% × {height}%
+          {width}% x {height}%
         </div>
         <div
           style={{
@@ -283,12 +267,7 @@ function MonitorPreview({ width, height }) {
             }}
           >
             <defs>
-              <pattern
-                id="mp-grid"
-                width="20"
-                height="20"
-                patternUnits="userSpaceOnUse"
-              >
+              <pattern id="mp-grid" width="20" height="20" patternUnits="userSpaceOnUse">
                 <path
                   d="M 20 0 L 0 0 0 20"
                   fill="none"
@@ -297,11 +276,7 @@ function MonitorPreview({ width, height }) {
                 />
               </pattern>
             </defs>
-            <rect
-              width={monitorWidth}
-              height={monitorHeight}
-              fill="url(#mp-grid)"
-            />
+            <rect width={monitorWidth} height={monitorHeight} fill="url(#mp-grid)" />
           </svg>
 
           <div
@@ -365,20 +340,10 @@ function SnapPage({ app }) {
           label="Enable snap"
           description="Resize the foreground window with a keyboard shortcut."
         >
-          <Toggle
-            on={app.snapEnabled}
-            onChange={(v) => app.set({ snapEnabled: v })}
-          />
+          <Toggle on={app.snapEnabled} onChange={(v) => app.set({ snapEnabled: v })} />
         </Row>
-        <Row
-          label="Game mode"
-          description="Skip snapping while a fullscreen app is in focus."
-          last
-        >
-          <Toggle
-            on={app.gameMode}
-            onChange={(v) => app.set({ gameMode: v })}
-          />
+        <Row label="Game mode" description="Skip snapping while a fullscreen app is in focus." last>
+          <Toggle on={app.gameMode} onChange={(v) => app.set({ gameMode: v })} />
         </Row>
       </Card>
 
@@ -408,10 +373,7 @@ function SnapPage({ app }) {
             showStatus={app.showStatus}
           />
         </Row>
-        <Row
-          label="Press count"
-          description="How many taps trigger the action."
-        >
+        <Row label="Press count" description="How many taps trigger the action.">
           <Stepper
             value={app.pressCount}
             onChange={(v) => app.set({ pressCount: v })}
@@ -460,6 +422,7 @@ function SnapPage({ app }) {
             variant="ghost"
             icon={<Icon name="play" size={12} />}
             onClick={app.onTestSnap}
+            title="Snap the last eligible window behind Virelo."
           >
             Test snap
           </Button>
@@ -467,18 +430,9 @@ function SnapPage({ app }) {
         <MonitorPreview width={app.width} height={app.height} />
         <div style={{ padding: `4px ${t.cardPad}px` }}>
           <Row label="Width" description={`${app.width}% of screen width`}>
-            <Slider
-              value={app.width}
-              onChange={(v) => app.set({ width: v })}
-              min={10}
-              max={100}
-            />
+            <Slider value={app.width} onChange={(v) => app.set({ width: v })} min={10} max={100} />
           </Row>
-          <Row
-            label="Height"
-            description={`${app.height}% of screen height`}
-            last
-          >
+          <Row label="Height" description={`${app.height}% of screen height`} last>
             <Slider
               value={app.height}
               onChange={(v) => app.set({ height: v })}
@@ -494,36 +448,41 @@ function SnapPage({ app }) {
 
 function ExplorerPage({ app }) {
   const t = useTokens();
+  const bridge = app.bridge;
+  const setModalOpen = app.setModalOpen;
   const [confirmAction, setConfirmAction] = React.useState(null);
   const [busy, setBusy] = React.useState(null);
+  const actionRegionRef = React.useRef(null);
+  const confirmExitFocusRef = React.useRef(null);
   const closeConfirm = React.useCallback(() => setConfirmAction(null), []);
-  const confirmDialogRef = useModalFocus(Boolean(confirmAction), closeConfirm);
+  const confirmDialogRef = useModalFocus(Boolean(confirmAction), closeConfirm, confirmExitFocusRef);
 
   React.useEffect(() => {
     const onViewsStatus = () => setBusy(null);
-    app.bridge.views_status?.connect(onViewsStatus);
-    return () => app.bridge.views_status?.disconnect?.(onViewsStatus);
-  }, [app.bridge]);
+    bridge.views_status?.connect(onViewsStatus);
+    return () => bridge.views_status?.disconnect?.(onViewsStatus);
+  }, [bridge]);
 
   React.useEffect(() => {
-    app.setModalOpen?.(Boolean(confirmAction));
-    return () => app.setModalOpen?.(false);
-  }, [app.setModalOpen, confirmAction]);
+    setModalOpen?.(Boolean(confirmAction));
+    return () => setModalOpen?.(false);
+  }, [confirmAction, setModalOpen]);
 
   const runViewsAction = (action) => {
-    setConfirmAction(null);
     const method =
-      action === "apply"
-        ? app.bridge.apply_details_view
-        : app.bridge.reset_folder_views;
+      action === "apply" ? app.bridge.apply_details_view : app.bridge.reset_folder_views;
     if (typeof method !== "function") {
+      setConfirmAction(null);
       // The backend build in use does not expose the folder view slots yet.
       app.showStatus?.(
         "Folder view changes are not supported by this backend build.",
         5000,
+        "error",
       );
       return;
     }
+    confirmExitFocusRef.current = actionRegionRef.current;
+    setConfirmAction(null);
     setBusy(action);
     const onResult = (result) => {
       try {
@@ -537,12 +496,12 @@ function ExplorerPage({ app }) {
           );
         } else {
           setBusy(null);
-          app.showStatus?.(r.error || "Folder view update failed.", 5000);
+          app.showStatus?.(r.error || "Folder view update failed.", 5000, "error");
         }
       } catch (error) {
         setBusy(null);
         console.error("[explorer] Failed to parse folder view result:", error);
-        app.showStatus?.("Folder view update failed.", 5000);
+        app.showStatus?.("Folder view update failed.", 5000, "error");
       }
     };
     method(onResult);
@@ -564,25 +523,25 @@ function ExplorerPage({ app }) {
         };
 
   return (
-    <Pg
-      title="Explorer"
-      subtitle="Quality-of-life tweaks for File Explorer's Details view."
-    >
+    <Pg title="Explorer" subtitle="Quality-of-life tweaks for File Explorer's Details view.">
       <Card>
         <Row
           label="Auto-size columns on folder change"
           description="Resize Details view columns to fit each time you navigate."
           last
         >
-          <Toggle
-            on={app.autoSize}
-            onChange={(v) => app.set({ autoSize: v })}
-          />
+          <Toggle on={app.autoSize} onChange={(v) => app.set({ autoSize: v })} />
         </Row>
       </Card>
 
       <Card title="Default folder view">
-        <div style={{ padding: `${t.rowPad}px 0` }}>
+        <div
+          ref={actionRegionRef}
+          role="group"
+          aria-label="Default folder view actions"
+          tabIndex={-1}
+          style={{ padding: `${t.rowPad}px 0` }}
+        >
           <div
             style={{
               fontSize: 12.5,
@@ -591,12 +550,10 @@ function ExplorerPage({ app }) {
               maxWidth: 560,
             }}
           >
-            Make Details the default view for every folder, the way WinSetView
-            does. File Explorer restarts when this is applied.
+            Make Details the default view for every folder, the way WinSetView does. File Explorer
+            restarts when this is applied.
           </div>
-          <div
-            style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}
-          >
+          <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
             <Button
               variant="primary"
               disabled={busy !== null}
@@ -609,9 +566,7 @@ function ExplorerPage({ app }) {
               disabled={busy !== null}
               onClick={() => setConfirmAction("reset")}
             >
-              {busy === "reset"
-                ? "Working..."
-                : "Reset folder views to Windows defaults"}
+              {busy === "reset" ? "Working..." : "Reset folder views to Windows defaults"}
             </Button>
           </div>
         </div>
@@ -644,8 +599,7 @@ function ExplorerPage({ app }) {
               background: t.surface,
               border: `1px solid ${t.borderHi}`,
               borderRadius: t.radius + 4,
-              boxShadow:
-                "0 20px 60px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.08)",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.08)",
               padding: `${t.cardPad + 4}px ${t.cardPad}px`,
             }}
           >
@@ -670,9 +624,7 @@ function ExplorerPage({ app }) {
             >
               {confirmCopy.body}
             </div>
-            <div
-              style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-            >
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <Button variant="secondary" onClick={closeConfirm}>
                 Cancel
               </Button>
@@ -690,13 +642,96 @@ function ExplorerPage({ app }) {
   );
 }
 
-function ShortcutsPage({ app }) {
+function ShortcutRows({ items }) {
   const t = useTokens();
+  return (
+    <>
+      {items.map((item, index) => (
+        <div
+          key={item.label}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            flexWrap: "wrap",
+            rowGap: 8,
+            padding: `${t.rowPad}px ${t.cardPad}px`,
+            borderBottom: index < items.length - 1 ? `1px solid ${t.border}` : "none",
+          }}
+        >
+          <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+            <div style={{ fontSize: 13, color: t.text }}>{item.label}</div>
+            {item.description && (
+              <div style={{ fontSize: 11.5, color: t.textDim, marginTop: 2 }}>
+                {item.description}
+              </div>
+            )}
+          </div>
+          <div
+            style={{
+              display: "flex",
+              flex: "1 1 260px",
+              flexWrap: "wrap",
+              gap: 3,
+              alignItems: "center",
+              justifyContent: "flex-end",
+              minWidth: 0,
+            }}
+          >
+            {item.hold && (
+              <span
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 3,
+                }}
+              >
+                <Kbd>{item.hold}</Kbd>
+                <span
+                  style={{
+                    color: t.textMuted,
+                    fontSize: 10,
+                    margin: "0 2px",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  (hold)
+                </span>
+              </span>
+            )}
+            {item.keys.map((key, keyIndex) => (
+              <span
+                key={`${key}-${keyIndex}`}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 3,
+                }}
+              >
+                {(keyIndex > 0 || item.hold) && (
+                  <span
+                    style={{
+                      color: t.textMuted,
+                      fontSize: 11,
+                    }}
+                  >
+                    +
+                  </span>
+                )}
+                <Kbd>{key}</Kbd>
+              </span>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function ShortcutsPage({ app }) {
   const taps = app.pressCount === 1 ? "once" : `${app.pressCount} times`;
-  // Restore is a modifier gesture: the restore key is HELD while the snap
-  // key is tapped the configured number of times (see snap.py, which checks
-  // keyboard.is_pressed(restore_key) when the press target is reached).
-  const items = [
+  // Restore is a modifier gesture: the restore key is held while the snap
+  // key is tapped the configured number of times.
+  const globalItems = [
     {
       label: "Trigger snap",
       description: `Tap ${app.snapKey} ${taps}.`,
@@ -708,92 +743,24 @@ function ShortcutsPage({ app }) {
       hold: app.restoreKey,
       keys: Array.from({ length: app.pressCount }, () => app.snapKey),
     },
+  ];
+  const appItems = [
     { label: "Command palette", keys: ["Ctrl", "K"] },
+    { label: "Save changes", keys: ["Ctrl", "S"] },
+    { label: "Toggle theme", keys: ["Ctrl", "T"] },
+    { label: "Test snap", keys: ["Ctrl", "Enter"] },
+    { label: "Help", keys: ["F1"] },
   ];
   return (
     <Pg
       title="Shortcuts"
-      subtitle="Global keyboard shortcuts registered by Virelo."
+      subtitle="Global snap gestures and shortcuts available while Virelo is open."
     >
-      <Card padding={false}>
-        {items.map((item, index) => (
-          <div
-            key={item.label}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              flexWrap: "wrap",
-              rowGap: 8,
-              padding: `${t.rowPad}px ${t.cardPad}px`,
-              borderBottom:
-                index < items.length - 1 ? `1px solid ${t.border}` : "none",
-            }}
-          >
-            <div style={{ flex: "1 1 180px", minWidth: 0 }}>
-              <div style={{ fontSize: 13, color: t.text }}>{item.label}</div>
-              {item.description && (
-                <div style={{ fontSize: 11.5, color: t.textDim, marginTop: 2 }}>
-                  {item.description}
-                </div>
-              )}
-            </div>
-            <div
-              style={{
-                display: "flex",
-                flex: "1 1 260px",
-                flexWrap: "wrap",
-                gap: 3,
-                alignItems: "center",
-                justifyContent: "flex-end",
-                minWidth: 0,
-              }}
-            >
-              {item.hold && (
-                <span
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 3,
-                  }}
-                >
-                  <Kbd>{item.hold}</Kbd>
-                  <span
-                    style={{
-                      color: t.textMuted,
-                      fontSize: 10,
-                      margin: "0 2px",
-                      whiteSpace: "nowrap",
-                    }}
-                  >
-                    (hold)
-                  </span>
-                </span>
-              )}
-              {item.keys.map((key, keyIndex) => (
-                <span
-                  key={`${key}-${keyIndex}`}
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 3,
-                  }}
-                >
-                  {(keyIndex > 0 || item.hold) && (
-                    <span
-                      style={{
-                        color: t.textMuted,
-                        fontSize: 11,
-                      }}
-                    >
-                      +
-                    </span>
-                  )}
-                  <Kbd>{key}</Kbd>
-                </span>
-              ))}
-            </div>
-          </div>
-        ))}
+      <Card title="Global snap gestures" padding={false}>
+        <ShortcutRows items={globalItems} />
+      </Card>
+      <Card title="In-app shortcuts" padding={false}>
+        <ShortcutRows items={appItems} />
       </Card>
     </Pg>
   );
@@ -801,22 +768,20 @@ function ShortcutsPage({ app }) {
 
 function GeneralPage({ app }) {
   const t = useTokens();
+  const setModalOpen = app.setModalOpen;
   const [confirmReset, setConfirmReset] = React.useState(false);
   const closeReset = React.useCallback(() => setConfirmReset(false), []);
   const resetDialogRef = useModalFocus(confirmReset, closeReset);
 
   React.useEffect(() => {
-    app.setModalOpen?.(confirmReset);
-    return () => app.setModalOpen?.(false);
-  }, [app.setModalOpen, confirmReset]);
+    setModalOpen?.(confirmReset);
+    return () => setModalOpen?.(false);
+  }, [confirmReset, setModalOpen]);
 
   return (
     <Pg title="General" subtitle="Application-wide preferences.">
       <Card title="Appearance">
-        <Row
-          label="Theme"
-          description="Light or dark surfaces throughout the app."
-        >
+        <Row label="Theme" description="Light or dark surfaces throughout the app.">
           <Segmented
             options={[
               { value: "system", label: "System" },
@@ -827,10 +792,7 @@ function GeneralPage({ app }) {
             onChange={(v) => app.set({ themeMode: v })}
           />
         </Row>
-        <Row
-          label="Accent color"
-          description="Used for selection, toggles, and primary actions."
-        >
+        <Row label="Accent color" description="Used for selection, toggles, and primary actions.">
           <div style={{ display: "flex", gap: 6 }}>
             {Object.entries(ACCENTS).map(([k, v]) => (
               <button
@@ -843,10 +805,7 @@ function GeneralPage({ app }) {
                   height: 22,
                   borderRadius: 11,
                   background: t.isDark ? v.dark : v.light,
-                  border:
-                    app.accent === k
-                      ? `2px solid ${t.text}`
-                      : `1px solid ${t.border}`,
+                  border: app.accent === k ? `2px solid ${t.text}` : `1px solid ${t.border}`,
                   cursor: "pointer",
                   padding: 0,
                 }}
@@ -854,11 +813,7 @@ function GeneralPage({ app }) {
             ))}
           </div>
         </Row>
-        <Row
-          label="Density"
-          description="Controls spacing throughout the app."
-          last
-        >
+        <Row label="Density" description="Controls spacing throughout the app." last>
           <Segmented
             options={[
               { value: "compact", label: "Compact" },
@@ -872,24 +827,15 @@ function GeneralPage({ app }) {
       </Card>
 
       <Card title="Startup">
-        <Row
-          label="Launch at login"
-          description="Start Virelo when you sign in to Windows."
-        >
-          <Toggle
-            on={app.launchLogin}
-            onChange={(v) => app.set({ launchLogin: v })}
-          />
+        <Row label="Launch at login" description="Start Virelo when you sign in to Windows.">
+          <Toggle on={app.launchLogin} onChange={(v) => app.set({ launchLogin: v })} />
         </Row>
         <Row
           label="Minimize to tray"
           description="Keep Virelo running in the notification area when closed."
           last
         >
-          <Toggle
-            on={app.minimizeToTray}
-            onChange={(v) => app.set({ minimizeToTray: v })}
-          />
+          <Toggle on={app.minimizeToTray} onChange={(v) => app.set({ minimizeToTray: v })} />
         </Row>
       </Card>
 
@@ -899,11 +845,7 @@ function GeneralPage({ app }) {
           description="Restore every preference to its default value."
           last
         >
-          <Button
-            variant="danger"
-            size="sm"
-            onClick={() => setConfirmReset(true)}
-          >
+          <Button variant="danger" size="sm" onClick={() => setConfirmReset(true)}>
             Reset
           </Button>
         </Row>
@@ -936,8 +878,7 @@ function GeneralPage({ app }) {
               background: t.surface,
               border: `1px solid ${t.borderHi}`,
               borderRadius: t.radius + 4,
-              boxShadow:
-                "0 20px 60px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.08)",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.08)",
               padding: `${t.cardPad + 4}px ${t.cardPad}px`,
             }}
           >
@@ -960,12 +901,9 @@ function GeneralPage({ app }) {
                 marginBottom: 20,
               }}
             >
-              This will restore every preference to its default value. This
-              cannot be undone.
+              This will restore every preference to its default value. This cannot be undone.
             </div>
-            <div
-              style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
-            >
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <Button variant="secondary" onClick={closeReset}>
                 Cancel
               </Button>
@@ -1011,12 +949,9 @@ function AboutPage() {
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 26,
-              fontWeight: 700,
-              letterSpacing: -1,
             }}
           >
-            V
+            <Icon name="mark" size={36} />
           </div>
           <div style={{ flex: 1 }}>
             <div
@@ -1100,21 +1035,9 @@ function Pg({ title, subtitle, children }) {
           </div>
         )}
       </div>
-      <div
-        style={{ display: "flex", flexDirection: "column", gap: t.sectionGap }}
-      >
-        {children}
-      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: t.sectionGap }}>{children}</div>
     </div>
   );
 }
 
-export {
-  SnapPage,
-  ExplorerPage,
-  ShortcutsPage,
-  GeneralPage,
-  AboutPage,
-  MonitorPreview,
-  Pg,
-};
+export { SnapPage, ExplorerPage, ShortcutsPage, GeneralPage, AboutPage, MonitorPreview, Pg };

@@ -38,11 +38,7 @@ function Toggle({ on, onChange, size = "md" }) {
           width: trackWidth,
           height: trackHeight,
           borderRadius: trackHeight / 2,
-          background: on
-            ? t.accent
-            : t.isDark
-              ? "rgba(255,255,255,0.12)"
-              : "#D6D2CB",
+          background: on ? t.accent : t.isDark ? "rgba(255,255,255,0.35)" : "#9A9389",
           position: "relative",
           transition: "background .15s",
         }}
@@ -135,6 +131,7 @@ function Button({
       {children}
       {kbd && (
         <span
+          aria-hidden="true"
           style={{
             marginLeft: 4,
             padding: "1px 5px",
@@ -186,15 +183,11 @@ function Card({ title, subtitle, children, footer, padding = true }) {
             </h2>
           )}
           {subtitle && (
-            <div style={{ fontSize: 12, color: t.textDim, marginTop: 2 }}>
-              {subtitle}
-            </div>
+            <div style={{ fontSize: 12, color: t.textDim, marginTop: 2 }}>{subtitle}</div>
           )}
         </div>
       )}
-      <div style={{ padding: padding ? `4px ${t.cardPad}px` : 0 }}>
-        {children}
-      </div>
+      <div style={{ padding: padding ? `4px ${t.cardPad}px` : 0 }}>{children}</div>
       {footer && (
         <div
           style={{
@@ -225,10 +218,7 @@ function Row({ label, description, children, last }) {
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div
-          id={labelId}
-          style={{ fontSize: 13.5, fontWeight: 500, color: t.text }}
-        >
+        <div id={labelId} style={{ fontSize: 13.5, fontWeight: 500, color: t.text }}>
           {label}
         </div>
         {description && (
@@ -261,9 +251,34 @@ function Row({ label, description, children, last }) {
 function Segmented({ options, value, onChange, mono }) {
   const t = useTokens();
   const row = React.useContext(RowControlContext);
+  const optionRefs = React.useRef([]);
+  const normalizedOptions = options.map((option) => ({
+    value: typeof option === "object" ? option.value : option,
+    label: typeof option === "object" ? option.label : option,
+  }));
+  const selectedIndex = normalizedOptions.findIndex((option) => option.value === value);
+
+  const moveSelection = (event, index) => {
+    let nextIndex;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (index + 1) % normalizedOptions.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (index - 1 + normalizedOptions.length) % normalizedOptions.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = normalizedOptions.length - 1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    onChange(normalizedOptions[nextIndex].value);
+    optionRefs.current[nextIndex]?.focus();
+  };
+
   return (
     <div
-      role="group"
+      role="radiogroup"
       aria-labelledby={row?.labelId}
       aria-describedby={row?.descriptionId}
       style={{
@@ -274,15 +289,20 @@ function Segmented({ options, value, onChange, mono }) {
         padding: 2,
       }}
     >
-      {options.map((o) => {
-        const val = typeof o === "object" ? o.value : o;
-        const label = typeof o === "object" ? o.label : o;
-        const active = value === val;
+      {normalizedOptions.map((option, index) => {
+        const active = value === option.value;
         return (
           <button
-            key={val}
-            aria-pressed={active}
-            onClick={() => onChange(val)}
+            key={option.value}
+            ref={(element) => {
+              optionRefs.current[index] = element;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            tabIndex={index === (selectedIndex >= 0 ? selectedIndex : 0) ? 0 : -1}
+            onClick={() => onChange(option.value)}
+            onKeyDown={(event) => moveSelection(event, index)}
             style={{
               height: 24,
               padding: "0 10px",
@@ -291,7 +311,7 @@ function Segmented({ options, value, onChange, mono }) {
               borderRadius: t.radius - 1,
               color: t.text,
               fontSize: 12,
-              fontWeight: active ? 600 : 500,
+              fontWeight: 500,
               fontFamily: mono ? t.mono : "inherit",
               letterSpacing: mono ? 0.3 : 0,
               cursor: "pointer",
@@ -303,7 +323,7 @@ function Segmented({ options, value, onChange, mono }) {
               transition: "background .12s",
             }}
           >
-            {label}
+            {option.label}
           </button>
         );
       })}
@@ -324,9 +344,112 @@ function stepButtonStyle(t) {
   };
 }
 
+const STEPPER_HOLD_DELAY_MS = 400;
+const STEPPER_REPEAT_MS = 60;
+
+function StepperButton({ label, direction, disabled, onStep, tokens }) {
+  const delayTimer = React.useRef(null);
+  const repeatTimer = React.useRef(null);
+  const suppressClick = React.useRef(false);
+
+  const stopRepeating = React.useCallback(() => {
+    if (delayTimer.current) clearTimeout(delayTimer.current);
+    if (repeatTimer.current) clearInterval(repeatTimer.current);
+    delayTimer.current = null;
+    repeatTimer.current = null;
+  }, []);
+
+  React.useEffect(() => stopRepeating, [stopRepeating]);
+
+  const onPointerDown = (event) => {
+    if (event.button !== 0 || disabled) return;
+    suppressClick.current = false;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    delayTimer.current = setTimeout(() => {
+      suppressClick.current = true;
+      onStep(direction);
+      repeatTimer.current = setInterval(() => onStep(direction), STEPPER_REPEAT_MS);
+    }, STEPPER_HOLD_DELAY_MS);
+  };
+
+  const onClick = () => {
+    if (suppressClick.current) {
+      suppressClick.current = false;
+      return;
+    }
+    onStep(direction);
+  };
+
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      onPointerDown={onPointerDown}
+      onPointerUp={stopRepeating}
+      onPointerCancel={stopRepeating}
+      onLostPointerCapture={stopRepeating}
+      style={{
+        ...stepButtonStyle(tokens),
+        cursor: disabled ? "not-allowed" : "pointer",
+        opacity: disabled ? 0.45 : 1,
+      }}
+    >
+      <Icon name={direction < 0 ? "minus" : "plus"} size={12} />
+    </button>
+  );
+}
+
 function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
   const t = useTokens();
   const row = React.useContext(RowControlContext);
+  const valueRef = React.useRef(value);
+  const [editing, setEditing] = React.useState(false);
+  const [draftValue, setDraftValue] = React.useState(String(value));
+  valueRef.current = value;
+
+  React.useEffect(() => {
+    if (!editing) setDraftValue(String(value));
+  }, [editing, value]);
+
+  const publishValue = React.useCallback(
+    (nextValue) => {
+      valueRef.current = nextValue;
+      setDraftValue(String(nextValue));
+      onChange(nextValue);
+    },
+    [onChange],
+  );
+
+  const changeBy = React.useCallback(
+    (direction) => {
+      const nextValue = Math.max(min, Math.min(max, valueRef.current + direction * step));
+      if (nextValue !== valueRef.current) publishValue(nextValue);
+    },
+    [max, min, publishValue, step],
+  );
+
+  const commitDraft = () => {
+    const normalizedDraft = draftValue.trim();
+    if (!normalizedDraft) {
+      setDraftValue(String(valueRef.current));
+      setEditing(false);
+      return;
+    }
+    const parsed = Number(normalizedDraft);
+    if (!Number.isFinite(parsed)) {
+      setDraftValue(String(valueRef.current));
+      setEditing(false);
+      return;
+    }
+    const aligned = min + Math.round((parsed - min) / step) * step;
+    const nextValue = Math.max(min, Math.min(max, aligned));
+    if (nextValue !== valueRef.current) publishValue(nextValue);
+    else setDraftValue(String(nextValue));
+    setEditing(false);
+  };
+
   return (
     <div
       role="group"
@@ -342,17 +465,16 @@ function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
         overflow: "hidden",
       }}
     >
-      <button
-        aria-label={`Decrease ${row?.label || "value"}`}
-        onClick={() => onChange(Math.max(min, value - step))}
-        style={stepButtonStyle(t)}
-      >
-        {"−"}
-      </button>
+      <StepperButton
+        label={`Decrease ${row?.label || "value"}`}
+        direction={-1}
+        disabled={value <= min}
+        onStep={changeBy}
+        tokens={t}
+      />
       <div
         style={{
-          minWidth: 48,
-          padding: "0 8px",
+          minWidth: suffix ? 68 : 52,
           fontSize: 13,
           fontWeight: 500,
           color: t.text,
@@ -367,18 +489,60 @@ function Stepper({ value, onChange, min = 1, max = 9999, step = 1, suffix }) {
           gap: 2,
         }}
       >
-        {value}
+        <input
+          className="virelo-stepper-input"
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={draftValue}
+          aria-labelledby={row?.labelId}
+          aria-describedby={row?.descriptionId}
+          aria-valuetext={suffix ? `${draftValue || valueRef.current} ${suffix}` : undefined}
+          onFocus={(event) => {
+            setEditing(true);
+            event.currentTarget.select();
+          }}
+          onChange={(event) => setDraftValue(event.target.value)}
+          onBlur={commitDraft}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              setDraftValue(String(valueRef.current));
+              setEditing(false);
+              event.currentTarget.blur();
+            }
+          }}
+          style={{
+            width: suffix ? 46 : 48,
+            height: "100%",
+            padding: suffix ? "0 2px 0 6px" : "0 4px",
+            border: "none",
+            background: "transparent",
+            color: t.text,
+            font: "inherit",
+            fontWeight: 500,
+            textAlign: "right",
+            fontVariantNumeric: "tabular-nums",
+            appearance: "textfield",
+          }}
+        />
         {suffix && (
-          <span style={{ color: t.textMuted, fontSize: 11 }}>{suffix}</span>
+          <span aria-hidden="true" style={{ color: t.textMuted, fontSize: 11, paddingRight: 6 }}>
+            {suffix}
+          </span>
         )}
       </div>
-      <button
-        aria-label={`Increase ${row?.label || "value"}`}
-        onClick={() => onChange(Math.min(max, value + step))}
-        style={stepButtonStyle(t)}
-      >
-        +
-      </button>
+      <StepperButton
+        label={`Increase ${row?.label || "value"}`}
+        direction={1}
+        disabled={value >= max}
+        onStep={changeBy}
+        tokens={t}
+      />
     </div>
   );
 }
@@ -393,9 +557,7 @@ function Slider({ value, onChange, min = 0, max = 100 }) {
     const rect = sliderRef.current.getBoundingClientRect();
     onChange(
       Math.round(
-        min +
-          Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) *
-            (max - min),
+        min + Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) * (max - min),
       ),
     );
   };
@@ -433,6 +595,14 @@ function Slider({ value, onChange, min = 0, max = 100 }) {
     if (event.key === "End") {
       event.preventDefault();
       onChange(max);
+    }
+    if (event.key === "PageDown") {
+      event.preventDefault();
+      onChange(clamp(value - Math.max(1, Math.round((max - min) / 10))));
+    }
+    if (event.key === "PageUp") {
+      event.preventDefault();
+      onChange(clamp(value + Math.max(1, Math.round((max - min) / 10))));
     }
   };
   return (

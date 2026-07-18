@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { ThemeProvider } from "./theme.jsx";
 import VireloApp from "./app.jsx";
 import { getBridge, getBridgeSync, parseSettingsResult } from "./bridge.js";
+import { FatalErrorScreen, VireloErrorBoundary } from "./fatal-error.jsx";
 
 /**
  * Render the application after the bridge and initial preferences are ready.
@@ -10,13 +11,7 @@ import { getBridge, getBridgeSync, parseSettingsResult } from "./bridge.js";
  * Keeping these hooks in a separate component lets `Root` render loading and
  * error states without calling hooks conditionally.
  */
-function AppWithBridge({
-  bridge,
-  initialTheme,
-  initialAccent,
-  initialDensity,
-  initialSettings,
-}) {
+function AppWithBridge({ bridge, initialTheme, initialAccent, initialDensity, initialSettings }) {
   const [tweaks, setTweaks] = React.useState({
     theme: initialTheme,
     accent: initialAccent || "slate",
@@ -67,9 +62,7 @@ function Root() {
     // If the bridge callbacks never fire, render the app with defaults
     // instead of showing the loading screen forever.
     const timer = setTimeout(() => {
-      console.warn(
-        "[main] Bridge did not respond within 3 seconds; rendering with defaults.",
-      );
+      console.warn("[main] Bridge did not respond within 3 seconds; rendering with defaults.");
       const fallback = getBridgeSync();
       finish(
         fallback
@@ -130,7 +123,7 @@ function Root() {
           alignItems: "center",
           justifyContent: "center",
           color: "CanvasText",
-          fontFamily: '"Inter", "Segoe UI", sans-serif',
+          fontFamily: "inherit",
           fontSize: 14,
         }}
       >
@@ -140,28 +133,7 @@ function Root() {
   }
 
   if (bridgeState.error) {
-    return (
-      <div
-        role="alert"
-        style={{
-          width: "100%",
-          height: "100%",
-          colorScheme: "light dark",
-          background: "Canvas",
-          color: "CanvasText",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          padding: 32,
-          fontFamily: 'Arial, "Segoe UI", sans-serif',
-          fontSize: 14,
-          textAlign: "center",
-        }}
-      >
-        {bridgeState.error} Restart Virelo. If the problem continues, reinstall
-        the application.
-      </div>
-    );
+    return <FatalErrorScreen message={bridgeState.error} />;
   }
 
   return (
@@ -180,4 +152,8 @@ if (!rootElement) {
   throw new Error('Virelo cannot start because the "root" element is missing.');
 }
 const root = createRoot(rootElement);
-root.render(<Root />);
+root.render(
+  <VireloErrorBoundary>
+    <Root />
+  </VireloErrorBoundary>,
+);

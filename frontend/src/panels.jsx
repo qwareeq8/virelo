@@ -7,6 +7,11 @@ import { Icon } from "./icons.jsx";
 
 function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
   const t = useTokens();
+  const gameMode = app.gameMode;
+  const setApp = app.set;
+  const snapEnabled = app.snapEnabled;
+  const unsaved = app.unsaved;
+  const saving = app.saving;
   const [query, setQuery] = React.useState("");
   const [activeIndex, setActiveIndex] = React.useState(0);
   const inputRef = React.useRef(null);
@@ -66,9 +71,9 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
         label: "Test snap",
         run: () => onTestSnap?.(),
         icon: "play",
-        kbd: "⏎",
+        kbd: "Enter",
       },
-      ...(app.unsaved
+      ...(unsaved && !saving
         ? [
             {
               grp: "Actions",
@@ -80,83 +85,73 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
         : []),
       {
         grp: "Actions",
-        label: app.snapEnabled ? "Disable snap" : "Enable snap",
-        run: () => app.set({ snapEnabled: !app.snapEnabled }),
+        label: snapEnabled ? "Disable snap" : "Enable snap",
+        run: () => setApp({ snapEnabled: !snapEnabled }),
         icon: "dot",
       },
       {
         grp: "Actions",
-        label: app.gameMode ? "Disable game mode" : "Enable game mode",
-        run: () => app.set({ gameMode: !app.gameMode }),
+        label: gameMode ? "Disable game mode" : "Enable game mode",
+        run: () => setApp({ gameMode: !gameMode }),
         icon: "dot",
       },
       {
         grp: "Theme",
         label: "Theme: System",
-        run: () => app.set({ themeMode: "system" }),
+        run: () => setApp({ themeMode: "system" }),
         icon: "spark",
       },
       {
         grp: "Theme",
         label: "Theme: Light",
-        run: () => app.set({ themeMode: "light" }),
+        run: () => setApp({ themeMode: "light" }),
         icon: "spark",
       },
       {
         grp: "Theme",
         label: "Theme: Dark",
-        run: () => app.set({ themeMode: "dark" }),
+        run: () => setApp({ themeMode: "dark" }),
         icon: "spark",
       },
       {
         grp: "Theme",
         label: "Accent: Slate",
-        run: () => app.set({ accent: "slate" }),
+        run: () => setApp({ accent: "slate" }),
         icon: "dot",
       },
       {
         grp: "Theme",
         label: "Accent: Teal",
-        run: () => app.set({ accent: "teal" }),
+        run: () => setApp({ accent: "teal" }),
         icon: "dot",
       },
       {
         grp: "Theme",
         label: "Accent: Blue",
-        run: () => app.set({ accent: "blue" }),
+        run: () => setApp({ accent: "blue" }),
         icon: "dot",
       },
       {
         grp: "Theme",
         label: "Accent: Rust",
-        run: () => app.set({ accent: "rust" }),
+        run: () => setApp({ accent: "rust" }),
         icon: "dot",
       },
       {
         grp: "Theme",
         label: "Accent: Purple",
-        run: () => app.set({ accent: "purple" }),
+        run: () => setApp({ accent: "purple" }),
         icon: "dot",
       },
     ],
-    [
-      app.gameMode,
-      app.set,
-      app.snapEnabled,
-      app.unsaved,
-      onSave,
-      onTestSnap,
-      setNav,
-    ],
+    [gameMode, onSave, onTestSnap, saving, setApp, setNav, snapEnabled, unsaved],
   );
 
   const normalizedQuery = query.trim().toLowerCase();
   const filtered = React.useMemo(
     () =>
       normalizedQuery
-        ? commands.filter((command) =>
-            command.label.toLowerCase().includes(normalizedQuery),
-          )
+        ? commands.filter((command) => command.label.toLowerCase().includes(normalizedQuery))
         : commands,
     [commands, normalizedQuery],
   );
@@ -186,12 +181,7 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
       } else if (event.key === "ArrowUp" && filtered.length > 0) {
         event.preventDefault();
         setActiveIndex((index) => Math.max(0, index - 1));
-      } else if (
-        event.key === "Enter" &&
-        !event.ctrlKey &&
-        !event.metaKey &&
-        !event.altKey
-      ) {
+      } else if (event.key === "Enter" && !event.ctrlKey && !event.metaKey && !event.altKey) {
         const command = filtered[activeIndex];
         if (!command) return;
         event.preventDefault();
@@ -247,8 +237,7 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
           background: t.surface,
           border: `1px solid ${t.borderHi}`,
           borderRadius: t.radius + 4,
-          boxShadow:
-            "0 20px 60px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.08)",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.08)",
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
@@ -274,9 +263,7 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
             aria-expanded="true"
             aria-controls={listboxId}
             aria-activedescendant={
-              filtered[activeIndex]
-                ? `${listboxId}-option-${activeIndex}`
-                : undefined
+              filtered[activeIndex] ? `${listboxId}-option-${activeIndex}` : undefined
             }
             value={query}
             onChange={(event) => {
@@ -287,7 +274,6 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
             style={{
               flex: 1,
               border: "none",
-              outline: "none",
               background: "transparent",
               color: t.text,
               fontSize: 14,
@@ -362,9 +348,7 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
                     <span style={{ color: active ? t.accent : t.textDim }}>
                       <Icon name={command.icon} size={13} />
                     </span>
-                    <span style={{ flex: 1, fontSize: 13 }}>
-                      {command.label}
-                    </span>
+                    <span style={{ flex: 1, fontSize: 13 }}>{command.label}</span>
                     {command.kbd && <Kbd>{command.kbd}</Kbd>}
                   </div>
                 );
@@ -385,11 +369,11 @@ function CommandPalette({ open, onClose, app, setNav, onTestSnap, onSave }) {
           }}
         >
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <Kbd>{"↑"}</Kbd>
-            <Kbd>{"↓"}</Kbd> navigate
+            <Kbd>Up</Kbd>
+            <Kbd>Down</Kbd> navigate
           </span>
           <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <Kbd>{"⏎"}</Kbd> select
+            <Kbd>Enter</Kbd> select
           </span>
           <div style={{ flex: 1 }} />
           <span>Virelo {__APP_VERSION__}</span>

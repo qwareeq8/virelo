@@ -26,19 +26,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 BRANDING_DIR = PROJECT_ROOT / "branding"
+ICON_SVG_PATH = BRANDING_DIR / "virelo-icon.svg"
 
 # Shared color tokens.
 SLATE = "#1C1A16"
 WHITE = "#FFFFFF"
 LIGHT_BG = "#FAF9F7"
-
-# The V glyph uses the same flattened geometry as ``virelo-icon.svg``.
-V_GLYPH_PATH = "M 48 48 L 128 208 L 208 48 L 172 48 L 128 148 L 84 48 Z"
-
 
 # Each bitmap specifies its canvas, background, tile geometry, and colors.
 BMP_SPECS = {
@@ -96,21 +94,31 @@ def find_inkscape() -> str:
     )
 
 
-def make_tile_svg(tile_size: int, tile_fill: str, glyph_fill: str) -> str:
-    """Build an SVG for a single rounded tile + V glyph at tile_size px.
+def make_tile_svg(tile_fill: str, glyph_fill: str) -> str:
+    """Recolor the shared application-icon SVG for one installer tile."""
+    try:
+        root = ET.fromstring(ICON_SVG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ET.ParseError) as error:
+        raise RuntimeError(f"Could not read the icon source {ICON_SVG_PATH}: {error}.") from error
 
-    The tile fills the view box. Its radius is proportional to the parent
-    icon, and its coordinates match ``branding/virelo-icon.svg``.
-    """
-    # The 48-unit radius scales proportionally from the 256-unit view box.
-    return (
-        f'<?xml version="1.0" encoding="UTF-8"?>'
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" '
-        f'width="256" height="256">'
-        f'<rect x="0" y="0" width="256" height="256" rx="48" ry="48" '
-        f'fill="{tile_fill}"/>'
-        f'<path d="{V_GLYPH_PATH}" fill="{glyph_fill}"/>'
-        f"</svg>"
+    colors = {SLATE.casefold(): tile_fill, WHITE.casefold(): glyph_fill}
+    replacements = 0
+    for element in root.iter():
+        for attribute in ("fill", "stroke"):
+            value = element.get(attribute)
+            replacement = colors.get(value.casefold()) if value is not None else None
+            if replacement is not None:
+                element.set(attribute, replacement)
+                replacements += 1
+    if replacements < 2:
+        raise RuntimeError(
+            f"The icon source {ICON_SVG_PATH} does not contain the expected brand colors."
+        )
+
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(
+        root,
+        encoding="unicode",
     )
 
 
@@ -151,7 +159,7 @@ def build_bmp(name: str, spec: dict, inkscape: str, tmp: Path) -> None:
 
     # Render RGBA at the exact tile size so the alpha channel preserves the
     # rounded corners during compositing.
-    tile_svg = make_tile_svg(tile_size, tile_fill, glyph_fill)
+    tile_svg = make_tile_svg(tile_fill, glyph_fill)
     tile_svg_path = tmp / f"{name}-tile.svg"
     tile_svg_path.write_text(tile_svg, encoding="utf-8")
 
@@ -185,6 +193,11 @@ def main() -> None:
     if not BRANDING_DIR.is_dir():
         raise FileNotFoundError(
             f"The branding directory is missing: {BRANDING_DIR}. "
+            "Restore it before regenerating installer bitmaps."
+        )
+    if not ICON_SVG_PATH.is_file():
+        raise FileNotFoundError(
+            f"The shared icon source is missing: {ICON_SVG_PATH}. "
             "Restore it before regenerating installer bitmaps."
         )
 

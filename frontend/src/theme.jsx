@@ -94,9 +94,9 @@ const DENSITIES = {
   },
 };
 
-const FONT =
-  '"Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif';
-const MONO = '"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace';
+const FONT = 'Arial, Helvetica, "Helvetica Neue", "DejaVu Sans", sans-serif';
+const MONO =
+  '"Latin Modern Mono", "Source Code Pro", ui-monospace, "Cascadia Code", Menlo, Consolas, monospace';
 
 const ThemeCtx = React.createContext(null);
 
@@ -119,10 +119,7 @@ function ThemeProvider({ tweaks, setTweaks, children }) {
       isDark: tweaks.theme === "dark",
     };
   }, [tweaks.theme, tweaks.accent, tweaks.density, tweaks.radius]);
-  const api = React.useMemo(
-    () => ({ tokens, tweaks, setTweaks }),
-    [tokens, tweaks, setTweaks],
-  );
+  const api = React.useMemo(() => ({ tokens, tweaks, setTweaks }), [tokens, tweaks, setTweaks]);
   return <ThemeCtx.Provider value={api}>{children}</ThemeCtx.Provider>;
 }
 
@@ -138,14 +135,4 @@ function useTokens() {
   return useTheme().tokens;
 }
 
-export {
-  ThemeProvider,
-  useTheme,
-  useTokens,
-  ACCENTS,
-  LIGHT,
-  DARK,
-  DENSITIES,
-  FONT,
-  MONO,
-};
+export { ThemeProvider, useTheme, useTokens, ACCENTS, LIGHT, DARK, DENSITIES, FONT, MONO };

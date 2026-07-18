@@ -1,6 +1,4 @@
-// Virelo renders these 16 SVG paths through the shared Icon component.
-
-import React from "react";
+// Virelo renders these SVG paths through the shared Icon component.
 
 const paths = {
   snap: (
@@ -37,22 +35,25 @@ const paths = {
       <path d="M10.5 10.5L14 14" />
     </g>
   ),
-  cmd: (
-    <path d="M5 3a2 2 0 1 1-2 2h10a2 2 0 1 1-2-2v10a2 2 0 1 1 2-2H3a2 2 0 1 1 2 2z" />
-  ),
+  cmd: <path d="M5 3a2 2 0 1 1-2 2h10a2 2 0 1 1-2-2v10a2 2 0 1 1 2-2H3a2 2 0 1 1 2 2z" />,
   plus: <path d="M8 3v10M3 8h10" />,
+  minus: <path d="M3 8h10" />,
   check: <path d="M3 8.5L6.5 12 13 4.5" />,
   x: <path d="M4 4l8 8M12 4l-8 8" />,
   chev: <path d="M5 3l4 5-4 5" />,
   dot: <circle cx="8" cy="8" r="2" />,
-  spark: (
-    <path d="M8 2l1.5 4.5L14 8l-4.5 1.5L8 14l-1.5-4.5L2 8l4.5-1.5z" />
-  ),
+  spark: <path d="M8 2l1.5 4.5L14 8l-4.5 1.5L8 14l-1.5-4.5L2 8l4.5-1.5z" />,
   play: <path d="M4 3l9 5-9 5z" />,
   reset: (
     <g>
       <path d="M3 8a5 5 0 1 0 1.5-3.5" />
       <path d="M3 3v3h3" />
+    </g>
+  ),
+  mark: (
+    <g>
+      <path d="M6 2H3.5A1.5 1.5 0 0 0 2 3.5V6M10 2h2.5A1.5 1.5 0 0 1 14 3.5V6M14 10v2.5a1.5 1.5 0 0 1-1.5 1.5H10M6 14H3.5A1.5 1.5 0 0 1 2 12.5V10" />
+      <rect x="5" y="6" width="6" height="4" rx="0.75" fill="currentColor" stroke="none" />
     </g>
   ),
 };

@@ -1,11 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { DARK, LIGHT, ThemeProvider } from "../theme.jsx";
-import { Toggle, Button, Card, Row, Slider, Badge } from "../primitives.jsx";
+import { Toggle, Button, Card, Row, Segmented, Stepper, Slider, Badge } from "../primitives.jsx";
 
 // Wrap each component in ThemeProvider with the minimum required tweaks.
-function renderWithTheme(ui) {
-  const tweaks = { theme: "dark", accent: "slate", density: "cozy", radius: 6 };
+function renderWithTheme(ui, theme = "dark") {
+  const tweaks = { theme, accent: "slate", density: "cozy", radius: 6 };
   return render(
     <ThemeProvider tweaks={tweaks} setTweaks={vi.fn()}>
       {ui}
@@ -22,6 +22,114 @@ describe("Toggle", () => {
   it("Renders the on state.", () => {
     renderWithTheme(<Toggle on={true} onChange={vi.fn()} />);
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("Uses perceivable off-state tracks in both themes.", () => {
+    const { unmount } = renderWithTheme(<Toggle on={false} onChange={vi.fn()} />, "light");
+    expect(screen.getByRole("switch").firstElementChild).toHaveStyle({
+      background: "#9A9389",
+    });
+    unmount();
+    renderWithTheme(<Toggle on={false} onChange={vi.fn()} />, "dark");
+    expect(screen.getByRole("switch").firstElementChild).toHaveStyle({
+      background: "rgba(255,255,255,0.35)",
+    });
+  });
+});
+
+describe("Segmented", () => {
+  it("Uses radio semantics and arrow-key selection for exclusive choices.", () => {
+    const onChange = vi.fn();
+    renderWithTheme(
+      <Row label="Theme">
+        <Segmented options={["System", "Light", "Dark"]} value="System" onChange={onChange} />
+      </Row>,
+    );
+    const group = screen.getByRole("radiogroup", { name: "Theme" });
+    const system = screen.getByRole("radio", { name: "System" });
+    const light = screen.getByRole("radio", { name: "Light" });
+
+    expect(group).toContainElement(system);
+    expect(system).toHaveAttribute("aria-checked", "true");
+    expect(system).toHaveAttribute("tabindex", "0");
+    expect(light).toHaveAttribute("tabindex", "-1");
+    fireEvent.keyDown(system, { key: "ArrowRight" });
+    expect(onChange).toHaveBeenCalledWith("Light");
+    expect(light).toHaveFocus();
+  });
+});
+
+describe("Stepper", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("Commits an edited value on blur and clamps it to the configured range.", () => {
+    const onChange = vi.fn();
+    renderWithTheme(
+      <Row label="Interval">
+        <Stepper value={1050} onChange={onChange} min={100} max={5000} step={50} suffix="ms" />
+      </Row>,
+    );
+    const input = screen.getByRole("spinbutton", { name: "Interval" });
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "5075" } });
+    fireEvent.blur(input);
+
+    expect(onChange).toHaveBeenCalledWith(5000);
+  });
+
+  it("Reverts an empty edit instead of changing the value to the minimum.", () => {
+    const onChange = vi.fn();
+    renderWithTheme(
+      <Row label="Interval">
+        <Stepper value={1050} onChange={onChange} min={100} max={5000} step={50} suffix="ms" />
+      </Row>,
+    );
+    const input = screen.getByRole("spinbutton", { name: "Interval" });
+
+    fireEvent.focus(input);
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue(1050);
+  });
+
+  it("Exposes a visible unit through the spinbutton value text.", () => {
+    renderWithTheme(
+      <Row label="Interval">
+        <Stepper value={1050} onChange={vi.fn()} min={100} max={5000} step={50} suffix="ms" />
+      </Row>,
+    );
+
+    expect(screen.getByRole("spinbutton", { name: "Interval" })).toHaveAttribute(
+      "aria-valuetext",
+      "1050 ms",
+    );
+    expect(
+      screen.getByRole("button", { name: "Decrease Interval" }).querySelector("svg"),
+    ).toBeInTheDocument();
+  });
+
+  it("Repeats safely while an increment button is held.", () => {
+    vi.useFakeTimers();
+    const onChange = vi.fn();
+    renderWithTheme(
+      <Row label="Interval">
+        <Stepper value={100} onChange={onChange} min={100} max={5000} step={50} />
+      </Row>,
+    );
+    const increase = screen.getByRole("button", { name: "Increase Interval" });
+
+    fireEvent.pointerDown(increase, { button: 0, pointerId: 1 });
+    act(() => vi.advanceTimersByTime(525));
+    fireEvent.pointerUp(increase, { pointerId: 1 });
+    const callsAfterHold = onChange.mock.calls.length;
+    fireEvent.click(increase);
+
+    expect(callsAfterHold).toBeGreaterThanOrEqual(2);
+    expect(onChange).toHaveBeenLastCalledWith(250);
+    expect(onChange).toHaveBeenCalledTimes(callsAfterHold);
   });
 });
 
@@ -56,9 +164,7 @@ describe("Card", () => {
         <p>Card content</p>
       </Card>,
     );
-    expect(
-      screen.getByRole("heading", { level: 2, name: "Test Card" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { level: 2, name: "Test Card" })).toBeInTheDocument();
     expect(screen.getByText("Card content")).toBeInTheDocument();
   });
 
@@ -138,19 +244,17 @@ describe("Slider", () => {
 
   it("Supports standard horizontal slider keyboard controls.", () => {
     const onChange = vi.fn();
-    renderWithTheme(
-      <Slider value={50} onChange={onChange} min={10} max={90} />,
-    );
+    renderWithTheme(<Slider value={50} onChange={onChange} min={10} max={90} />);
     const slider = screen.getByRole("slider");
 
     fireEvent.keyDown(slider, { key: "ArrowUp" });
     fireEvent.keyDown(slider, { key: "ArrowDown" });
     fireEvent.keyDown(slider, { key: "Home" });
     fireEvent.keyDown(slider, { key: "End" });
+    fireEvent.keyDown(slider, { key: "PageDown" });
+    fireEvent.keyDown(slider, { key: "PageUp" });
 
-    expect(onChange.mock.calls.map(([value]) => value)).toEqual([
-      51, 49, 10, 90,
-    ]);
+    expect(onChange.mock.calls.map(([value]) => value)).toEqual([51, 49, 10, 90, 42, 58]);
   });
 
   it("Uses the row description as its accessible description.", () => {
@@ -160,9 +264,9 @@ describe("Slider", () => {
       </Row>,
     );
 
-    expect(
-      screen.getByRole("slider", { name: "Window width" }),
-    ).toHaveAccessibleDescription("Percentage of screen width.");
+    expect(screen.getByRole("slider", { name: "Window width" })).toHaveAccessibleDescription(
+      "Percentage of screen width.",
+    );
   });
 });
 
@@ -179,9 +283,7 @@ describe("Row control names", () => {
 });
 
 function relativeLuminance(hex) {
-  const channels = [1, 3, 5].map(
-    (offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255,
-  );
+  const channels = [1, 3, 5].map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255);
   const linear = channels.map((value) =>
     value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
   );
@@ -195,17 +297,9 @@ function contrastRatio(foreground, background) {
 
 describe("semantic text contrast", () => {
   it("Keeps muted and danger text at WCAG AA contrast in both themes.", () => {
-    expect(
-      contrastRatio(LIGHT.textMuted, LIGHT.sidebar),
-    ).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(DARK.textMuted, DARK.surface)).toBeGreaterThanOrEqual(
-      4.5,
-    );
-    expect(
-      contrastRatio(LIGHT.dangerText, LIGHT.surface),
-    ).toBeGreaterThanOrEqual(4.5);
-    expect(contrastRatio(DARK.dangerText, DARK.surface)).toBeGreaterThanOrEqual(
-      4.5,
-    );
+    expect(contrastRatio(LIGHT.textMuted, LIGHT.sidebar)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(DARK.textMuted, DARK.surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(LIGHT.dangerText, LIGHT.surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(DARK.dangerText, DARK.surface)).toBeGreaterThanOrEqual(4.5);
   });
 });

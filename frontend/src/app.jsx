@@ -2,13 +2,7 @@
 
 import React from "react";
 import { useTokens, useTheme } from "./theme.jsx";
-import {
-  SnapPage,
-  ExplorerPage,
-  ShortcutsPage,
-  GeneralPage,
-  AboutPage,
-} from "./pages.jsx";
+import { SnapPage, ExplorerPage, ShortcutsPage, GeneralPage, AboutPage } from "./pages.jsx";
 import { CommandPalette } from "./panels.jsx";
 import { Button, Badge } from "./primitives.jsx";
 import { Icon } from "./icons.jsx";
@@ -17,6 +11,9 @@ import { Icon } from "./icons.jsx";
 // the UI on every pointer move, but bridge writes are throttled to this rate
 // with a trailing write so the final value is always sent.
 const SAVE_THROTTLE_MS = 150;
+const BRIDGE_CALL_TIMEOUT_MS = 10_000;
+const SETTINGS_TRANSACTION_TOMBSTONE_TTL_MS = 5 * 60_000;
+const MAX_SETTINGS_TRANSACTION_TOMBSTONES = 128;
 const TRANSACTION_KEY = "__vireloTransaction";
 const STATE_ENCODERS = {
   snapEnabled: ["enable_snap", (value) => value],
@@ -50,10 +47,119 @@ const CAPTURE_STATUS_COPY = {
   timeout: "Capture timed out.",
 };
 
+const ERROR_STATUS_PATTERN =
+  /\b(?:already in progress|cannot|could not|failed|failure|no window|not supported|rejected|timed out)\b/i;
+const SUCCESS_STATUS_PATTERN =
+  /\b(?:applied|changes saved|key set|now the default|reset complete|saved successfully)\b/i;
+
+function statusToneForMessage(message) {
+  if (ERROR_STATUS_PATTERN.test(message)) return "error";
+  if (SUCCESS_STATUS_PATTERN.test(message)) return "success";
+  return "neutral";
+}
+
+function rememberSettingsTransactionTombstone(tombstones, transactionId) {
+  const now = Date.now();
+  for (const [candidateId, expiresAt] of tombstones) {
+    if (expiresAt <= now) tombstones.delete(candidateId);
+  }
+  tombstones.set(transactionId, now + SETTINGS_TRANSACTION_TOMBSTONE_TTL_MS);
+  while (tombstones.size > MAX_SETTINGS_TRANSACTION_TOMBSTONES) {
+    tombstones.delete(tombstones.keys().next().value);
+  }
+}
+
+function consumeSettingsTransactionTombstone(tombstones, transactionId) {
+  const now = Date.now();
+  for (const [candidateId, expiresAt] of tombstones) {
+    if (expiresAt <= now) tombstones.delete(candidateId);
+  }
+  return tombstones.delete(transactionId);
+}
+
+function WindowControlButton({ label, command, icon, danger = false, bridge }) {
+  const t = useTokens();
+  const [hovered, setHovered] = React.useState(false);
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      onClick={() => bridge.setWindowCommand(command, () => {})}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        width: 36,
+        height: 34,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: hovered && danger ? "#FFFFFF" : t.textDim,
+        background: hovered ? (danger ? "#E81123" : t.hover) : "transparent",
+        border: "none",
+        cursor: "pointer",
+        fontFamily: "inherit",
+      }}
+    >
+      <Icon name={icon} size={12} />
+    </button>
+  );
+}
+
 function TitleBar({ onOpenPalette, bridge }) {
   const t = useTokens();
+  const titleBarRef = React.useRef(null);
+  const interactiveRef = React.useRef(null);
+  const controlsRef = React.useRef(null);
+
+  React.useLayoutEffect(() => {
+    if (typeof bridge.set_hit_test_regions !== "function") return undefined;
+
+    const reportRegions = () => {
+      const titleRect = titleBarRef.current?.getBoundingClientRect();
+      const interactiveRect = interactiveRef.current?.getBoundingClientRect();
+      const controlsRect = controlsRef.current?.getBoundingClientRect();
+      if (!titleRect || !interactiveRect || !controlsRect) return;
+      const interactiveWidth = Math.ceil(interactiveRect.right - titleRect.left);
+      const controlsWidth = Math.ceil(titleRect.right - controlsRect.left);
+      const titleBarHeight = Math.ceil(titleRect.height);
+      if (interactiveWidth <= 0 || controlsWidth <= 0 || titleBarHeight <= 0) {
+        return;
+      }
+      bridge.set_hit_test_regions(interactiveWidth, controlsWidth, titleBarHeight, (rawResult) => {
+        try {
+          const result = JSON.parse(rawResult);
+          if (!result?.ok) {
+            console.warn(
+              "[app] The backend rejected the measured title-bar regions:",
+              result?.error || "Unknown error.",
+            );
+          }
+        } catch (error) {
+          console.warn("[app] The backend returned an invalid title-bar response:", error);
+        }
+      });
+    };
+
+    reportRegions();
+    const ResizeObserverConstructor = globalThis.ResizeObserver;
+    let observer = null;
+    if (typeof ResizeObserverConstructor === "function") {
+      observer = new ResizeObserverConstructor(reportRegions);
+      observer.observe(titleBarRef.current);
+      observer.observe(interactiveRef.current);
+      observer.observe(controlsRef.current);
+    }
+    window.addEventListener("resize", reportRegions);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", reportRegions);
+    };
+  }, [bridge]);
+
   return (
     <div
+      ref={titleBarRef}
+      data-hit-test-region="titlebar"
       style={{
         height: 34,
         display: "flex",
@@ -63,6 +169,8 @@ function TitleBar({ onOpenPalette, bridge }) {
       }}
     >
       <div
+        ref={interactiveRef}
+        data-hit-test-region="interactive"
         style={{
           width: 320,
           height: "100%",
@@ -75,23 +183,17 @@ function TitleBar({ onOpenPalette, bridge }) {
       >
         <div
           style={{
-            width: 14,
-            height: 14,
-            borderRadius: Math.min(t.radius, 3),
-            background: t.accent,
+            width: 16,
+            height: 16,
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            color: t.accentOn,
-            fontSize: 9,
-            fontWeight: 700,
+            color: t.accent,
           }}
         >
-          V
+          <Icon name="mark" size={16} />
         </div>
-        <div style={{ fontSize: 12, fontWeight: 500, color: t.text }}>
-          Virelo
-        </div>
+        <div style={{ fontSize: 12, fontWeight: 500, color: t.text }}>Virelo</div>
 
         <button
           aria-label="Search or jump to commands"
@@ -103,9 +205,7 @@ function TitleBar({ onOpenPalette, bridge }) {
             gap: 8,
             height: 22,
             padding: "0 8px",
-            background: t.isDark
-              ? "rgba(255,255,255,0.04)"
-              : "rgba(0,0,0,0.035)",
+            background: t.isDark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.035)",
             border: `1px solid ${t.border}`,
             borderRadius: t.radius,
             color: t.textDim,
@@ -116,72 +216,29 @@ function TitleBar({ onOpenPalette, bridge }) {
           }}
         >
           <Icon name="search" size={11} />
-          <span style={{ flex: 1, textAlign: "left" }}>
-            Search or jump to...
-          </span>
-          <span style={{ fontFamily: t.mono, fontSize: 10, opacity: 0.7 }}>
-            Ctrl K
-          </span>
+          <span style={{ flex: 1, textAlign: "left" }}>Search or jump to...</span>
+          <span style={{ fontFamily: t.mono, fontSize: 10, opacity: 0.7 }}>Ctrl K</span>
         </button>
       </div>
 
       <div style={{ flex: 1 }} />
       <div
+        ref={controlsRef}
+        data-hit-test-region="controls"
         style={{
           width: 72,
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          paddingRight: 6,
           flexShrink: 0,
         }}
       >
-        <button
-          aria-label="Minimize Virelo"
-          onClick={() => bridge.setWindowCommand("minimize", () => {})}
-          style={{
-            width: 28,
-            height: 26,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: t.textDim,
-            fontSize: 10,
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-            fontFamily: "inherit",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = t.hover)}
-          onMouseLeave={(e) =>
-            (e.currentTarget.style.background = "transparent")
-          }
-        >
-          {"—"}
-        </button>
-        <button
-          aria-label="Close Virelo"
-          onClick={() => bridge.setWindowCommand("close", () => {})}
-          style={{
-            width: 28,
-            height: 26,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: t.textDim,
-            fontSize: 10,
-            background: "transparent",
-            border: "none",
-            cursor: "pointer",
-            fontFamily: "inherit",
-          }}
-          onMouseEnter={(e) => (e.currentTarget.style.background = "#e81123")}
-          onMouseLeave={(e) =>
-            (e.currentTarget.style.background = "transparent")
-          }
-        >
-          {"x"}
-        </button>
+        <WindowControlButton
+          label="Minimize Virelo"
+          command="minimize"
+          icon="minus"
+          bridge={bridge}
+        />
+        <WindowControlButton label="Close Virelo" command="close" icon="x" danger bridge={bridge} />
       </div>
     </div>
   );
@@ -335,7 +392,7 @@ function Sidebar({ nav, setNav, app, mode }) {
   );
 }
 
-function Footer({ unsaved, saving, onSave, onDiscard, statusMsg }) {
+function Footer({ unsaved, saving, onSave, onDiscard, status }) {
   const t = useTokens();
   return (
     <div
@@ -348,14 +405,33 @@ function Footer({ unsaved, saving, onSave, onDiscard, statusMsg }) {
         gap: 10,
       }}
     >
-      {statusMsg && (
-        <span
-          role="status"
-          aria-live="polite"
-          style={{ fontSize: 12, color: t.textDim }}
+      {status && (
+        <div
+          role={status.tone === "error" ? "alert" : "status"}
+          aria-live={status.tone === "error" ? "assertive" : "polite"}
+          title={status.message}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            minWidth: 0,
+            overflow: "hidden",
+            color: status.tone === "error" ? t.dangerText : t.textDim,
+            fontSize: 12,
+          }}
         >
-          {statusMsg}
-        </span>
+          {status.tone === "error" && <Icon name="x" size={12} />}
+          <span
+            style={{
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {status.message}
+          </span>
+        </div>
       )}
       <div style={{ flex: 1 }} />
       {unsaved && (
@@ -380,12 +456,18 @@ function Footer({ unsaved, saving, onSave, onDiscard, statusMsg }) {
             />
             Unsaved changes
           </div>
-          <Button variant="secondary" onClick={onDiscard}>
+          <Button variant="secondary" onClick={onDiscard} disabled={saving}>
             Discard
           </Button>
         </>
       )}
-      <Button variant="primary" onClick={onSave} disabled={!unsaved || saving}>
+      <Button
+        variant="primary"
+        onClick={onSave}
+        disabled={!unsaved || saving}
+        aria-keyshortcuts="Control+S"
+        kbd="Ctrl S"
+      >
         Save changes
       </Button>
     </div>
@@ -403,7 +485,7 @@ export function bridgeToState(settings) {
     width: settings.width_pct ?? 76,
     height: settings.height_pct ?? 76,
     gameMode: settings.game_mode_enabled ?? true,
-    autoSize: settings.ex_auto_size ?? true,
+    autoSize: settings.ex_auto_size ?? false,
     launchLogin: settings.run_at_startup ?? false,
     accent: settings.accent || "slate",
     density: settings.density || "cozy",
@@ -429,17 +511,13 @@ export default function VireloApp({ bridge, initialSettings = null }) {
   const t = useTokens();
   const [nav, setNav] = React.useState("snap");
   const [palette, setPalette] = React.useState(false);
-  const [state, setState] = React.useState(() =>
-    bridgeToState(initialSettings ?? {}),
-  );
+  const [state, setState] = React.useState(() => bridgeToState(initialSettings ?? {}));
   const [unsaved, setUnsaved] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
-  const [statusMsg, setStatusMsg] = React.useState("");
+  const [status, setStatus] = React.useState(null);
   const [captureActive, setCaptureActive] = React.useState(false);
   const [modalOpen, setModalOpen] = React.useState(false);
-  const [settingsHydrated, setSettingsHydrated] = React.useState(
-    initialSettings !== null,
-  );
+  const [settingsHydrated, setSettingsHydrated] = React.useState(initialSettings !== null);
   const stateRef = React.useRef(state);
   const dirtyRevisions = React.useRef(new Map());
   const nextRevision = React.useRef(1);
@@ -448,8 +526,10 @@ export default function VireloApp({ bridge, initialSettings = null }) {
     initialSettings !== null ? bridgeToState(initialSettings) : null,
   );
   const expectedSettingsSignals = React.useRef(new Map());
+  const settingsTransactionTombstones = React.useRef(new Map());
   const nextTransaction = React.useRef(1);
   const operationTail = React.useRef(Promise.resolve());
+  const saveInFlight = React.useRef(false);
   const saveTimer = React.useRef(null);
   const pendingSave = React.useRef({});
   const lastSaveAt = React.useRef(0);
@@ -495,10 +575,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         }
         if (context?.type === "discard" || context?.type === "reset") {
           const operationRevision = context.revisions?.get(key);
-          if (
-            operationRevision !== undefined &&
-            revision <= operationRevision
-          ) {
+          if (operationRevision !== undefined && revision <= operationRevision) {
             dirtyRevisions.current.delete(key);
             removePendingKey(key);
           } else {
@@ -512,8 +589,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         // actually changed in the backend snapshot supersede a local edit;
         // unrelated unsent edits remain intact.
         const changedExternally =
-          previousBackend !== null &&
-          !Object.is(incoming[key], previousBackend[key]);
+          previousBackend !== null && !Object.is(incoming[key], previousBackend[key]);
         if (changedExternally) {
           dirtyRevisions.current.delete(key);
           removePendingKey(key);
@@ -541,27 +617,53 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         const transactionId = signalContext
           ? `virelo-${Date.now()}-${nextTransaction.current++}`
           : null;
+        const expectedEntry = transactionId ? { context: signalContext, cleanupTimer: null } : null;
         if (transactionId) {
-          expectedSettingsSignals.current.set(transactionId, signalContext);
+          expectedSettingsSignals.current.set(transactionId, expectedEntry);
         }
 
         const callArgs = [...args];
         if (
           transactionId &&
-          [
-            "save_settings",
-            "commit_draft",
-            "discard_draft",
-            "reset_defaults",
-          ].includes(method)
+          ["save_settings", "commit_draft", "discard_draft", "reset_defaults"].includes(method)
         ) {
           callArgs.push(transactionId);
         }
 
         const removeExpected = () => {
           if (transactionId) {
+            if (expectedEntry?.cleanupTimer) {
+              clearTimeout(expectedEntry.cleanupTimer);
+            }
             expectedSettingsSignals.current.delete(transactionId);
           }
+        };
+        const armExpectedCleanup = () => {
+          if (
+            !transactionId ||
+            expectedSettingsSignals.current.get(transactionId) !== expectedEntry
+          ) {
+            return;
+          }
+          expectedEntry.cleanupTimer = setTimeout(() => {
+            if (expectedSettingsSignals.current.get(transactionId) === expectedEntry) {
+              rememberSettingsTransactionTombstone(
+                settingsTransactionTombstones.current,
+                transactionId,
+              );
+              expectedSettingsSignals.current.delete(transactionId);
+            }
+          }, BRIDGE_CALL_TIMEOUT_MS);
+        };
+        let settled = false;
+        let callbackTimer = null;
+        const settle = (result) => {
+          if (settled) return;
+          settled = true;
+          if (callbackTimer) clearTimeout(callbackTimer);
+          if (!result.ok) removeExpected();
+          else armExpectedCleanup();
+          resolve(result);
         };
         const finish = (rawResult) => {
           let result;
@@ -576,18 +678,31 @@ export default function VireloApp({ bridge, initialSettings = null }) {
               error: `Invalid response from ${method}: ${error.message}`,
             };
           }
-          if (!result.ok) removeExpected();
-          resolve(result);
+          settle(result);
         };
 
+        callbackTimer = setTimeout(() => {
+          if (
+            transactionId &&
+            expectedSettingsSignals.current.get(transactionId) === expectedEntry
+          ) {
+            rememberSettingsTransactionTombstone(
+              settingsTransactionTombstones.current,
+              transactionId,
+            );
+          }
+          settle({
+            ok: false,
+            error: `The backend method "${method}" did not respond within 10 seconds.`,
+          });
+        }, BRIDGE_CALL_TIMEOUT_MS);
         try {
           if (typeof bridge[method] !== "function") {
             throw new Error(`Backend method "${method}" is unavailable.`);
           }
           bridge[method](...callArgs, finish);
         } catch (error) {
-          removeExpected();
-          resolve({
+          settle({
             ok: false,
             error: error instanceof Error ? error.message : String(error),
           });
@@ -599,14 +714,15 @@ export default function VireloApp({ bridge, initialSettings = null }) {
   // Footer status helper. Shows a message and clears it after timeoutMs
   // milliseconds; a timeout of 0 keeps the message until it is replaced.
   const statusTimer = React.useRef(null);
-  const showStatus = React.useCallback((message, timeoutMs = 0) => {
+  const showStatus = React.useCallback((message, timeoutMs = 0, tone = "neutral") => {
     if (statusTimer.current) {
       clearTimeout(statusTimer.current);
       statusTimer.current = null;
     }
-    setStatusMsg(message);
-    if (timeoutMs > 0) {
-      statusTimer.current = setTimeout(() => setStatusMsg(""), timeoutMs);
+    if (!mounted.current) return;
+    setStatus({ message: String(message), tone });
+    if (tone !== "error" && timeoutMs > 0) {
+      statusTimer.current = setTimeout(() => setStatus(null), timeoutMs);
     }
   }, []);
   React.useEffect(
@@ -635,11 +751,11 @@ export default function VireloApp({ bridge, initialSettings = null }) {
             setSettingsHydrated(true);
           } else {
             const detail = response?.error ? ` ${response.error}` : "";
-            showStatus(`Settings could not be loaded.${detail}`, 5000);
+            showStatus(`Settings could not be loaded.${detail}`, 5000, "error");
           }
         } catch (error) {
           console.error("[app] Failed to parse initial settings:", error);
-          showStatus("Settings could not be loaded; defaults are shown.", 5000);
+          showStatus("Settings could not be loaded; defaults are shown.", 5000, "error");
         }
       });
     }
@@ -649,11 +765,22 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         const settings = JSON.parse(json);
         const transactionId = settings[TRANSACTION_KEY];
         delete settings[TRANSACTION_KEY];
-        const context = transactionId
+        if (
+          transactionId &&
+          consumeSettingsTransactionTombstone(settingsTransactionTombstones.current, transactionId)
+        ) {
+          return;
+        }
+        const expectedEntry = transactionId
           ? expectedSettingsSignals.current.get(transactionId)
           : null;
-        if (transactionId)
+        if (expectedEntry?.cleanupTimer) {
+          clearTimeout(expectedEntry.cleanupTimer);
+        }
+        const context = expectedEntry?.context ?? null;
+        if (transactionId) {
           expectedSettingsSignals.current.delete(transactionId);
+        }
         applyIncomingSettings(settings, context ?? null);
       } catch (error) {
         console.error("[app] Failed to parse settings_changed:", error);
@@ -669,19 +796,22 @@ export default function VireloApp({ bridge, initialSettings = null }) {
       showStatus(
         message,
         typeof timeoutMs === "number" && timeoutMs >= 0 ? timeoutMs : 3000,
+        statusToneForMessage(message),
       );
     };
 
     const onCaptureStatus = (status) => {
       setCaptureActive(status === "capturing");
       const message = CAPTURE_STATUS_COPY[status] || status;
-      showStatus(message, status === "capturing" ? 0 : 3000);
+      const tone = status === "done" ? "success" : status === "timeout" ? "error" : "neutral";
+      showStatus(message, status === "capturing" ? 0 : 3000, tone);
     };
 
     const onViewsStatus = (message, timeoutMs) => {
       showStatus(
         message,
         typeof timeoutMs === "number" && timeoutMs >= 0 ? timeoutMs : 3000,
+        statusToneForMessage(message),
       );
     };
 
@@ -699,13 +829,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
       bridge.capture_status.disconnect?.(onCaptureStatus);
       bridge.views_status?.disconnect?.(onViewsStatus);
     };
-  }, [
-    applyIncomingSettings,
-    bridge,
-    initialSettings,
-    refreshUnsaved,
-    showStatus,
-  ]);
+  }, [applyIncomingSettings, bridge, initialSettings, refreshUnsaved, showStatus]);
 
   // Mirror of the latest state so `set` can compute the next local snapshot
   // without calling the bridge inside the setState updater, which must stay
@@ -734,8 +858,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
 
   const queueDraftEntries = React.useCallback(
     (entries, reportErrors = true) => {
-      if (Object.keys(entries).length === 0)
-        return Promise.resolve({ ok: true });
+      if (Object.keys(entries).length === 0) return Promise.resolve({ ok: true });
       lastSaveAt.current = Date.now();
       return enqueueOperation(async () => {
         const patch = {};
@@ -747,14 +870,13 @@ export default function VireloApp({ bridge, initialSettings = null }) {
           }
         }
         if (Object.keys(patch).length === 0) return { ok: true };
-        const result = await callBridge(
-          "save_settings",
-          [stateToBridge(patch)],
-          { type: "stage", revisions },
-        );
+        const result = await callBridge("save_settings", [stateToBridge(patch)], {
+          type: "stage",
+          revisions,
+        });
         if (!result.ok && reportErrors) {
           console.error("[app] save_settings failed:", result.error);
-          showStatus(`Save failed: ${result.error}`, 5000);
+          showStatus(`Save failed: ${result.error}`, 5000, "error");
         }
         return result;
       });
@@ -796,9 +918,11 @@ export default function VireloApp({ bridge, initialSettings = null }) {
     [queueDraftEntries, takePendingSave],
   );
 
-  const handleSave = () => {
+  const handleSave = React.useCallback(() => {
+    if (saveInFlight.current) return;
     const revisions = new Map(dirtyRevisions.current);
     if (revisions.size === 0) return;
+    saveInFlight.current = true;
     takePendingSave();
     const patch = {};
     for (const key of revisions.keys()) patch[key] = stateRef.current[key];
@@ -812,7 +936,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
       });
       if (!staged.ok) {
         console.error("[app] save_settings failed:", staged.error);
-        showStatus(`Save failed: ${staged.error}`, 5000);
+        showStatus(`Save failed: ${staged.error}`, 5000, "error");
         return false;
       }
       const committed = await callBridge("commit_draft", [], {
@@ -821,7 +945,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
       });
       if (!committed.ok) {
         console.error("[app] commit_draft failed:", committed.error);
-        showStatus(`Save failed: ${committed.error}`, 5000);
+        showStatus(`Save failed: ${committed.error}`, 5000, "error");
         return false;
       }
 
@@ -837,12 +961,14 @@ export default function VireloApp({ bridge, initialSettings = null }) {
           ? "Changes saved."
           : "Earlier changes saved; newer changes remain.",
         3000,
+        "success",
       );
       return true;
     }).finally(() => {
+      saveInFlight.current = false;
       if (mounted.current) setSaving(false);
     });
-  };
+  }, [callBridge, enqueueOperation, refreshUnsaved, showStatus, takePendingSave]);
 
   const handleDiscard = () => {
     const revisions = new Map(dirtyRevisions.current);
@@ -853,7 +979,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
       const result = await callBridge("discard_draft", [], context);
       if (!result.ok) {
         console.error("[app] discard_draft failed:", result.error);
-        showStatus(`Discard failed: ${result.error}`, 5000);
+        showStatus(`Discard failed: ${result.error}`, 5000, "error");
         refreshUnsaved();
         return;
       }
@@ -882,7 +1008,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
       const result = await callBridge("reset_defaults", [], context);
       if (!result.ok) {
         console.error("[app] reset_defaults failed:", result.error);
-        showStatus(`Reset failed: ${result.error}`, 5000);
+        showStatus(`Reset failed: ${result.error}`, 5000, "error");
         refreshUnsaved();
         return;
       }
@@ -907,6 +1033,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
           showStatus(
             `Test snap failed: ${response?.error || "The backend rejected the request."}`,
             5000,
+            "error",
           );
         }
       } catch (error) {
@@ -914,6 +1041,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         showStatus(
           "Test snap failed because the backend returned an invalid response.",
           5000,
+          "error",
         );
       }
     });
@@ -931,13 +1059,14 @@ export default function VireloApp({ bridge, initialSettings = null }) {
           if (!result?.ok) {
             const detail = result?.error || "The backend rejected the request.";
             console.error("[app] set_modal_open failed:", detail);
-            showStatus(`Modal shortcut guard failed: ${detail}`, 5000);
+            showStatus(`Modal shortcut guard failed: ${detail}`, 5000, "error");
           }
         } catch (error) {
           console.error("[app] Invalid set_modal_open response:", error);
           showStatus(
             "Modal shortcut guard failed because the backend returned an invalid response.",
             5000,
+            "error",
           );
         }
       });
@@ -946,8 +1075,8 @@ export default function VireloApp({ bridge, initialSettings = null }) {
   );
 
   React.useEffect(() => {
-    updateNativeShortcutGuard(modalOpen || palette);
-  }, [modalOpen, palette, updateNativeShortcutGuard]);
+    updateNativeShortcutGuard(captureActive || modalOpen || palette);
+  }, [captureActive, modalOpen, palette, updateNativeShortcutGuard]);
 
   React.useEffect(
     () => () => {
@@ -965,6 +1094,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
     bridge,
     showStatus,
     captureActive,
+    saving,
     setCaptureActive,
     setModalOpen: updateModalOpen,
   };
@@ -974,18 +1104,26 @@ export default function VireloApp({ bridge, initialSettings = null }) {
     if (captureActive || modalOpen) setPalette(false);
   }, [captureActive, modalOpen]);
 
-  // Toggle the command palette with Ctrl+K.
+  // Handle application shortcuts that belong to the React surface.
   React.useEffect(() => {
     const on = (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === "k") {
         e.preventDefault();
         if (captureActive || modalOpen) return;
-        setPalette((o) => !o);
+        setPalette((open) => !open);
+      } else if (key === "s") {
+        e.preventDefault();
+        if (e.repeat || captureActive || modalOpen || palette || saving || !unsaved) {
+          return;
+        }
+        handleSave();
       }
     };
     window.addEventListener("keydown", on);
     return () => window.removeEventListener("keydown", on);
-  }, [captureActive, modalOpen]);
+  }, [captureActive, handleSave, modalOpen, palette, saving, unsaved]);
 
   React.useEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = 0;
@@ -1002,6 +1140,10 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         color: t.text,
         fontFamily: t.font,
         fontSize: t.fontBase,
+        colorScheme: t.isDark ? "dark" : "light",
+        "--virelo-focus": t.accent,
+        "--virelo-scrollbar-thumb": t.isDark ? "rgba(255,255,255,0.35)" : "#9A9389",
+        "--virelo-scrollbar-track": t.bg,
         letterSpacing: -0.05,
         display: "flex",
         flexDirection: "column",
@@ -1015,12 +1157,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         bridge={bridge}
       />
       <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
-        <Sidebar
-          nav={nav}
-          setNav={setNav}
-          app={app}
-          mode={tweaks.sidebarMode}
-        />
+        <Sidebar nav={nav} setNav={setNav} app={app} mode={tweaks.sidebarMode} />
         <main
           ref={contentRef}
           tabIndex={-1}
@@ -1039,7 +1176,7 @@ export default function VireloApp({ bridge, initialSettings = null }) {
         saving={saving}
         onSave={handleSave}
         onDiscard={handleDiscard}
-        statusMsg={statusMsg}
+        status={status}
       />
       <CommandPalette
         open={palette && !captureActive && !modalOpen}
