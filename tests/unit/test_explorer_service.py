@@ -1,5 +1,6 @@
 """Tests for Explorer autosize worker lifecycle recovery."""
 
+import sys
 from types import SimpleNamespace
 
 from virelo.services import explorer_service
@@ -27,6 +28,30 @@ class _StoppingThread:
 class _Worker:
     def stop(self):
         pass
+
+
+def test_full_autosize_retry_enables_column_diagnostics(monkeypatch):
+    """The escalated callback differs from quick attempts by inspecting columns."""
+    calls = []
+
+    def autosize(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True, "com"
+
+    fake_module = SimpleNamespace(autosize_explorer_columns=autosize)
+    monkeypatch.setitem(sys.modules, "virelo.services.explorer_columns", fake_module)
+
+    assert explorer_service._autosize_explorer_columns_quick(42, r"C:\Data", 3, True) == (
+        True,
+        "com",
+    )
+    assert explorer_service._autosize_explorer_columns_full(42, r"C:\Data", 3, True) == (
+        True,
+        "com",
+    )
+
+    assert "dump_columns" not in calls[0][1]
+    assert calls[1][1]["dump_columns"] is True
 
 
 def test_unexpected_worker_exit_schedules_bounded_restart(monkeypatch):

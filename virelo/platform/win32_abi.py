@@ -112,7 +112,6 @@ def handle_value(value: int | ctypes.c_void_p | None) -> int:
 USER32: Any = None
 KERNEL32: Any = None
 SHELL32: Any = None
-SHCORE: Any = None
 DWMAPI: Any = None
 ADVAPI32: Any = None
 
@@ -120,7 +119,6 @@ if sys.platform == "win32":
     USER32 = ctypes.WinDLL("user32", use_last_error=True)
     KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
     SHELL32 = ctypes.WinDLL("shell32", use_last_error=True)
-    SHCORE = ctypes.WinDLL("shcore", use_last_error=True)
     DWMAPI = ctypes.WinDLL("dwmapi", use_last_error=True)
     ADVAPI32 = ctypes.WinDLL("advapi32", use_last_error=True)
 
@@ -150,9 +148,6 @@ if sys.platform == "win32":
     USER32.GetPropW.restype = HANDLE
     USER32.RemovePropW.argtypes = (HWND, LPCWSTR)
     USER32.RemovePropW.restype = HANDLE
-    USER32.SetProcessDPIAware.argtypes = ()
-    USER32.SetProcessDPIAware.restype = BOOL
-
     KERNEL32.OpenMutexW.argtypes = (DWORD, BOOL, LPCWSTR)
     KERNEL32.OpenMutexW.restype = HANDLE
     KERNEL32.CloseHandle.argtypes = (HANDLE,)
@@ -170,9 +165,6 @@ if sys.platform == "win32":
     SHELL32.ShellExecuteW.restype = HINSTANCE
     SHELL32.SetCurrentProcessExplicitAppUserModelID.argtypes = (LPCWSTR,)
     SHELL32.SetCurrentProcessExplicitAppUserModelID.restype = HRESULT
-
-    SHCORE.SetProcessDpiAwareness.argtypes = (INT,)
-    SHCORE.SetProcessDpiAwareness.restype = HRESULT
 
     DWMAPI.DwmGetWindowAttribute.argtypes = (HWND, DWORD, LPVOID, DWORD)
     DWMAPI.DwmGetWindowAttribute.restype = HRESULT

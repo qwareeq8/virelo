@@ -23,7 +23,10 @@ from __future__ import annotations
 import ctypes
 import logging
 import os
+import re
+import shutil
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,12 +41,15 @@ from virelo.platform.win32_abi import (
     STARTUPINFOW,
     USER32,
 )
+from virelo.services.explorer_constants import FVM_DETAILS
 
 LOG = logging.getLogger("Virelo")
 
 REG_EXPORT_TIMEOUT_SECONDS = 15
 TASKKILL_TIMEOUT_SECONDS = 10
+BACKUP_RETENTION_COUNT = 10
 _CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+_BACKUP_DIRECTORY_PATTERN = re.compile(r"view-backup-\d{8}-\d{6}-\d{6}(?:-\d{2})?\Z")
 
 # Registry paths, all relative to HKCU unless noted otherwise.
 SHELL_CLASSES = r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell"
@@ -61,7 +67,7 @@ THIS_PC_PIDL = bytes.fromhex("14001F50E04FD020EA3A6910A2D808002B30309D0000")
 
 # Details view constants (WinSetView SetViewValues index 1).
 LOGICAL_VIEW_MODE_DETAILS = 1
-MODE_DETAILS = 4
+MODE_DETAILS = FVM_DETAILS
 ICON_SIZE_DETAILS = 16
 BAG_FFLAGS = 0x41200001
 GROUP_BY_FMTID = "{B725F130-47EF-101A-A5F1-02608C9EEBAC}"
@@ -300,6 +306,64 @@ def _key_exists(winreg, key: str) -> bool:
         raise
 
 
+def _prune_registry_backups(
+    base: str,
+    keep: int = BACKUP_RETENTION_COUNT,
+    *,
+    protected: str | None = None,
+) -> None:
+    """Keep the newest matching backups while preserving the just-created backup."""
+    if keep < 1:
+        raise ValueError("Backup retention must keep at least one directory.")
+    try:
+        entries = list(os.scandir(base))
+    except FileNotFoundError:
+        return
+    except OSError:
+        LOG.warning("Folder-view backup retention could not inspect %s.", base, exc_info=True)
+        return
+
+    candidates = []
+    for entry in entries:
+        try:
+            if not _BACKUP_DIRECTORY_PATTERN.fullmatch(entry.name):
+                continue
+            if entry.is_symlink() or (
+                hasattr(os.path, "isjunction") and os.path.isjunction(entry.path)
+            ):
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                candidates.append(entry)
+        except OSError:
+            LOG.warning(
+                "Folder-view backup retention could not inspect %s.", entry.path, exc_info=True
+            )
+
+    resolved_base = os.path.realpath(os.path.abspath(base))
+    candidates.sort(key=lambda entry: entry.name, reverse=True)
+    retained = {os.path.normcase(os.path.abspath(entry.path)) for entry in candidates[:keep]}
+    protected_path = os.path.normcase(os.path.abspath(protected)) if protected else None
+    candidate_paths = {os.path.normcase(os.path.abspath(entry.path)) for entry in candidates}
+    if protected_path in candidate_paths and protected_path not in retained:
+        retained.discard(os.path.normcase(os.path.abspath(candidates[keep - 1].path)))
+        retained.add(protected_path)
+
+    for entry in candidates:
+        entry_path = os.path.normcase(os.path.abspath(entry.path))
+        if entry_path in retained:
+            continue
+        try:
+            resolved_entry = os.path.realpath(os.path.abspath(entry.path))
+            if os.path.commonpath((resolved_base, resolved_entry)) != resolved_base:
+                LOG.warning("Folder-view backup retention rejected path %s.", entry.path)
+                continue
+            shutil.rmtree(entry.path)
+        except (OSError, ValueError):
+            LOG.warning(
+                "Folder-view backup retention could not remove %s.", entry.path, exc_info=True
+            )
+
+
 def _backup_registry_state() -> str:
     """Export the affected keys to ``.reg`` files and return the backup directory.
 
@@ -309,45 +373,69 @@ def _backup_registry_state() -> str:
     winreg = _open_winreg()
     base = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "Virelo")
     backup_name = backup_dir_name(datetime.now())
-    target = os.path.join(base, backup_name)
-    suffix = 1
-    while True:
-        try:
-            os.makedirs(target, exist_ok=False)
-            break
-        except FileExistsError:
-            target = os.path.join(base, f"{backup_name}-{suffix:02d}")
-            suffix += 1
-    for index, key in enumerate(BACKUP_KEYS):
-        out_file = os.path.join(target, f"{index:02d}-{key.rsplit(chr(92), 1)[-1]}.reg")
-        try:
-            result = subprocess.run(
-                [
-                    _system32_executable("reg.exe"),
-                    "export",
-                    "HKCU\\" + key,
-                    out_file,
-                    "/y",
-                    "/reg:64",
-                ],
-                capture_output=True,
-                creationflags=_CREATE_NO_WINDOW,
-                check=False,
-                timeout=REG_EXPORT_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"Backup of HKCU\\{key} timed out after {REG_EXPORT_TIMEOUT_SECONDS} seconds."
-            ) from exc
-        if result.returncode != 0:
-            if _key_exists(winreg, key):
-                stderr = result.stderr.decode("utf-8", "replace").strip()
-                raise RuntimeError(
-                    f"Backup of existing key HKCU\\{key} failed: "
-                    f"{stderr or 'reg.exe reported an error.'}"
+    os.makedirs(base, exist_ok=True)
+    # An interrupted export must never look like a complete retained backup.
+    # Publish the final name atomically only after every existing key succeeds.
+    staging = tempfile.mkdtemp(prefix=f".{backup_name}-staging-", dir=base)
+    try:
+        for index, key in enumerate(BACKUP_KEYS):
+            out_file = os.path.join(staging, f"{index:02d}-{key.rsplit(chr(92), 1)[-1]}.reg")
+            try:
+                result = subprocess.run(
+                    [
+                        _system32_executable("reg.exe"),
+                        "export",
+                        "HKCU\\" + key,
+                        out_file,
+                        "/y",
+                        "/reg:64",
+                    ],
+                    capture_output=True,
+                    creationflags=_CREATE_NO_WINDOW,
+                    check=False,
+                    timeout=REG_EXPORT_TIMEOUT_SECONDS,
                 )
-            # Key does not exist yet; nothing to back up.
-            LOG.info("Backup skipped for missing key HKCU\\%s.", key)
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"Backup of HKCU\\{key} timed out after {REG_EXPORT_TIMEOUT_SECONDS} seconds."
+                ) from exc
+            if result.returncode != 0:
+                if _key_exists(winreg, key):
+                    stderr = result.stderr.decode("utf-8", "replace").strip()
+                    raise RuntimeError(
+                        f"Backup of existing key HKCU\\{key} failed: "
+                        f"{stderr or 'reg.exe reported an error.'}"
+                    )
+                # Key does not exist yet; nothing to back up.
+                LOG.info("Backup skipped for missing key HKCU\\%s.", key)
+
+        suffix = 0
+        while True:
+            candidate_name = backup_name if suffix == 0 else f"{backup_name}-{suffix:02d}"
+            target = os.path.join(base, candidate_name)
+            suffix += 1
+            if os.path.lexists(target):
+                continue
+            try:
+                # This is an atomic, no-replace publication on supported Windows hosts.
+                os.rename(staging, target)
+                break
+            except OSError:
+                # Another process may have published this timestamp between the
+                # existence check and rename. Retry only when that target now exists.
+                if os.path.lexists(target):
+                    continue
+                raise
+    finally:
+        if os.path.lexists(staging):
+            try:
+                shutil.rmtree(staging)
+            except OSError:
+                LOG.warning("Could not remove incomplete folder-view backup %s.", staging)
+    # Prune only after every existing registry key was exported successfully.
+    # Exact-name filtering and reparse-point rejection keep deletion confined
+    # to Virelo-owned backup directories.
+    _prune_registry_backups(base, protected=target)
     return target
 
 

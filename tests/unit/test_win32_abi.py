@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ctypes
 import importlib
+import logging
+import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -79,6 +81,25 @@ def test_singleton_mutex_path_preserves_high_handle(monkeypatch: pytest.MonkeyPa
     kernel32.CloseHandle.assert_called_once_with(HIGH_PROCESS)
 
 
+@pytest.mark.parametrize(("last_error", "expected"), [(2, False), (5, True)])
+def test_singleton_mutex_distinguishes_missing_from_access_denied(
+    monkeypatch: pytest.MonkeyPatch,
+    last_error: int,
+    expected: bool,
+) -> None:
+    """Access denied proves the mutex exists, while a missing object does not."""
+    app_main = importlib.import_module("virelo.app.__main__")
+    kernel32 = SimpleNamespace(
+        OpenMutexW=MagicMock(return_value=0),
+        CloseHandle=MagicMock(return_value=True),
+    )
+    monkeypatch.setattr(app_main, "KERNEL32", kernel32)
+    monkeypatch.setattr(app_main.ctypes, "get_last_error", lambda: last_error, raising=False)
+
+    assert app_main._instance_already_running() is expected
+    kernel32.CloseHandle.assert_not_called()
+
+
 def test_focus_path_preserves_high_hwnd(monkeypatch: pytest.MonkeyPatch) -> None:
     """The focus path finds only a marked Virelo window and preserves its high HWND."""
 
@@ -98,7 +119,7 @@ def test_focus_path_preserves_high_hwnd(monkeypatch: pytest.MonkeyPatch) -> None
 
     app_main._focus_running_instance()
 
-    user32.ShowWindow.assert_called_once_with(HIGH_HWND, 5)
+    user32.ShowWindow.assert_called_once_with(HIGH_HWND, 9)
     user32.SetForegroundWindow.assert_called_once_with(HIGH_HWND)
 
 
@@ -125,6 +146,88 @@ def test_focus_path_ignores_an_unmarked_same_title_window(
 
     user32.ShowWindow.assert_not_called()
     user32.SetForegroundWindow.assert_not_called()
+
+
+def test_existing_instance_notification_focuses_and_reports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Either singleton race path provides the same focus and message feedback."""
+    app_main = importlib.import_module("virelo.app.__main__")
+    focus = MagicMock()
+    message_box = MagicMock(return_value=1)
+    logger = MagicMock()
+    monkeypatch.setattr(app_main, "_focus_running_instance", focus)
+    monkeypatch.setattr(app_main, "USER32", SimpleNamespace(MessageBoxW=message_box))
+
+    app_main._notify_already_running(logger)
+
+    focus.assert_called_once_with()
+    logger.info.assert_called_once()
+    message_box.assert_called_once()
+
+
+def test_elevation_arguments_use_windows_command_line_quoting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Source relaunch preserves spaces, embedded quotes, and trailing slashes."""
+    app_main = importlib.import_module("virelo.app.__main__")
+    argv = [
+        r"C:\Program Files\Virelo\main.py",
+        "value with spaces",
+        'embedded"quote',
+        "trailing\\",
+    ]
+    monkeypatch.setattr(app_main, "select_pythonw_executable", lambda _value: "pythonw.exe")
+
+    target, arguments = app_main._elevation_target_and_arguments(
+        "python.exe",
+        argv,
+        frozen=False,
+    )
+
+    assert target == "pythonw.exe"
+    assert arguments == subprocess.list2cmdline([app_main.os.path.abspath(argv[0]), *argv[1:]])
+
+
+def test_elevation_failure_does_not_require_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A windowed frozen process reports UAC failure without writing to None."""
+    app_main = importlib.import_module("virelo.app.__main__")
+    logger = MagicMock()
+    message_box = MagicMock(return_value=1)
+    monkeypatch.setattr(app_main.sys, "stderr", None)
+    monkeypatch.setattr(app_main, "USER32", SimpleNamespace(MessageBoxW=message_box))
+
+    app_main._report_elevation_failure(logger, 5)
+
+    logger.error.assert_called_once()
+    message_box.assert_called_once()
+
+
+def test_windowed_logger_omits_console_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A console-free build logs to disk without installing a None stream."""
+    app_main = importlib.import_module("virelo.app.__main__")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(app_main, "APP_NAME", "VireloLoggerTest")
+    monkeypatch.setattr(app_main, "LOG_DIR", "logs")
+    monkeypatch.setattr(app_main, "LOG_FILE", "test.log")
+    monkeypatch.setattr(app_main.sys, "stderr", None)
+
+    logger = app_main._init_logger()
+    try:
+        console_handlers = [
+            handler
+            for handler in logger.handlers
+            if isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, logging.handlers.RotatingFileHandler)
+        ]
+        assert console_handlers == []
+    finally:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
+            handler.close()
 
 
 def _store_dword(pointer: Any, value: int) -> None:

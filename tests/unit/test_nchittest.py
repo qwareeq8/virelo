@@ -20,12 +20,13 @@ from virelo.app.window_hit_test import (
     HTRIGHT,
     HTTOP,
     HTTOPLEFT,
-    HTTOPRIGHT,
     RESIZE_BORDER,
     TITLE_BAR_CONTROLS_WIDTH,
     TITLE_BAR_HEIGHT,
     TITLE_BAR_INTERACTIVE_WIDTH,
+    classify_physical_window_hit,
     classify_window_hit,
+    normalize_hit_test_regions,
 )
 
 # ---------------------------------------------------------------------------
@@ -122,9 +123,9 @@ class TestClassifyHit:
         """Top-left corner returns HTTOPLEFT."""
         assert classify_hit(2, 2, 1000, 620) == HTTOPLEFT
 
-    def test_httopright_corner(self):
-        """Top-right corner returns HTTOPRIGHT."""
-        assert classify_hit(998, 2, 1000, 620) == HTTOPRIGHT
+    def test_httopright_corner_is_reserved_for_caption_controls(self):
+        """The close-button corner remains client content instead of a resize target."""
+        assert classify_hit(998, 2, 1000, 620) == 0
 
     def test_htbottomleft_corner(self):
         """Bottom-left corner returns HTBOTTOMLEFT."""
@@ -173,3 +174,58 @@ class TestClassifyHit:
     def test_title_bar_boundary_exact(self):
         """The exact 34-pixel title boundary falls through to the page."""
         assert classify_hit(500, TITLE_BAR_HEIGHT, 1000, 620) == 0
+
+    def test_measured_regions_replace_the_fallback_contract(self):
+        """Measured frontend widths define the drag spacer without code duplication."""
+        assert (
+            classify_window_hit(
+                400,
+                10,
+                1000,
+                620,
+                interactive_width=410,
+                controls_width=90,
+                title_bar_height=40,
+            )
+            == 0
+        )
+        assert (
+            classify_window_hit(
+                410,
+                10,
+                1000,
+                620,
+                interactive_width=410,
+                controls_width=90,
+                title_bar_height=40,
+            )
+            == HTCAPTION
+        )
+
+
+def test_physical_hit_testing_handles_negative_origin_at_150_percent() -> None:
+    """A physical native point maps to the correct CSS-pixel drag region."""
+    window_rect = (-1920, 120, -420, 1050)
+    assert classify_physical_window_hit(-1170, 135, window_rect, 1.5) == HTCAPTION
+
+
+def test_physical_hit_testing_scales_resize_border() -> None:
+    """The four-DIP left resize strip becomes six physical pixels at 150 percent."""
+    window_rect = (300, 200, 1800, 1130)
+    assert classify_physical_window_hit(305, 650, window_rect, 1.5) == HTLEFT
+    assert classify_physical_window_hit(306, 650, window_rect, 1.5) == 0
+
+
+@pytest.mark.parametrize(
+    ("regions", "error_type"),
+    [
+        ((True, 72, 34), TypeError),
+        ((320, 0, 34), ValueError),
+        ((320, 72, 0), ValueError),
+        ((5000, 72, 34), ValueError),
+    ],
+)
+def test_measured_region_validation_rejects_untrusted_values(regions, error_type) -> None:
+    """The WebChannel measurement slot accepts only bounded integer CSS pixels."""
+    with pytest.raises(error_type):
+        normalize_hit_test_regions(*regions)

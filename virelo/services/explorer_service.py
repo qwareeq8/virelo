@@ -46,16 +46,13 @@ def _autosize_explorer_columns_full(
     target_index: int | None = None,
     caller_owns_com: bool = False,
 ) -> tuple[bool, str]:
-    """Run a full COM-only autosize attempt and return success and method.
-
-    The full path is currently identical to the quick path because no fallback
-    implementation is enabled.
-    """
+    """Retry COM autosizing with column diagnostics enabled."""
     from virelo.services.explorer_columns import autosize_explorer_columns
 
     return autosize_explorer_columns(
         top_hwnd,
         allow_keyboard_fallback=False,
+        dump_columns=True,
         target_path=target_path,
         target_index=target_index,
         caller_owns_com=caller_owns_com,
@@ -114,7 +111,6 @@ class ExplorerService:
             _autosize_explorer_columns_quick,
             _autosize_explorer_columns_full,
             _is_window_interactive,
-            schedule=(0.05, 0.1, 0.25, 0.5, 1.0),
         )
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)

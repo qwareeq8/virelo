@@ -13,8 +13,13 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 from virelo.platform.paths import canonicalize_path, resolve_explorer_location
+from virelo.services.explorer_constants import (
+    DEFAULT_AUTOSIZE_RETRY_SCHEDULE,
+    FVM_DETAILS,
+)
 
 LOG = logging.getLogger("Virelo")
 
@@ -31,6 +36,20 @@ BACKOFF_MAX_MS = 3000  # This is the maximum backoff duration.
 
 # Deduplication lifetime.
 DEDUPE_TTL_SECONDS = 300  # Entries remain valid for five minutes.
+
+type AutosizeResult = tuple[bool, str] | tuple[bool, str, bool] | bool
+
+
+class AutosizeCallback(Protocol):
+    """Describe the worker callback contract, including its COM ownership flags."""
+
+    def __call__(
+        self,
+        top_hwnd: int,
+        target_path: str | None = None,
+        target_index: int | None = None,
+        caller_owns_com: bool = False,
+    ) -> AutosizeResult: ...
 
 
 @dataclass(frozen=True)
@@ -125,14 +144,11 @@ class ExplorerAutosizeEngine:
     caller-owned COM contract.
     """
 
-    # The default retry schedule uses 50, 100, 250, 500, and 1,000 milliseconds.
-    DEFAULT_SCHEDULE = (0.05, 0.1, 0.25, 0.5, 1.0)
-
     def __init__(
         self,
         iter_tabs: Callable[[], list],
-        autosize_try: Callable[[int, int, str | None], tuple[bool, str, bool]],
-        autosize_full: Callable[[int, int, str | None], tuple[bool, str, bool]],
+        autosize_try: Callable[[int, int, str | None], AutosizeResult],
+        autosize_full: Callable[[int, int, str | None], AutosizeResult],
         is_window_interactive: Callable[[int], bool],
         schedule: tuple[float, ...] | None = None,
     ):
@@ -149,7 +165,7 @@ class ExplorerAutosizeEngine:
         self._autosize_try = autosize_try
         self._autosize_full = autosize_full
         self._is_window_interactive = is_window_interactive
-        self._schedule = schedule if schedule else self.DEFAULT_SCHEDULE
+        self._schedule = schedule if schedule else DEFAULT_AUTOSIZE_RETRY_SCHEDULE
 
         # Per-tab state maps an HWND and worker COM identity to its state.
         self.tab_state: dict[tuple[int, int], TabAutosizeState] = {}
@@ -226,7 +242,7 @@ class ExplorerAutosizeEngine:
         """Process one step of the tab-aware autosize engine.
 
         Args:
-            now: Current ``time.time()`` timestamp.
+            now: Current ``time.monotonic()`` timestamp.
 
         Returns:
             Recommended delay before the next step, in seconds.
@@ -350,7 +366,7 @@ class ExplorerAutosizeEngine:
                     view_mode,
                 )
                 state.view_mode = view_mode
-                if view_mode == 4:
+                if view_mode == FVM_DETAILS:
                     self._clear_dedupe_for_tab(hwnd, tab_id)
                     self._arm_state(state, now)
                 elif view_mode is not None:
@@ -582,13 +598,10 @@ if QtCore is not None:
 
         finished = QtCore.Signal()
 
-        # Default retry schedule: debounce, then 100ms, 250ms, 500ms, 1s
-        DEFAULT_SCHEDULE = (0.05, 0.1, 0.25, 0.5, 1.0)
-
         def __init__(
             self,
-            autosize_try: Callable[[int], tuple[bool, str]],
-            autosize_full: Callable[[int], tuple[bool, str]],
+            autosize_try: AutosizeCallback,
+            autosize_full: AutosizeCallback,
             is_window_interactive: Callable[[int], bool],
             schedule: tuple[float, ...] | None = None,
         ):
@@ -608,7 +621,7 @@ if QtCore is not None:
             self._autosize_try_legacy = autosize_try
             self._autosize_full_legacy = autosize_full
             self._is_window_interactive = is_window_interactive
-            self._schedule = schedule if schedule else self.DEFAULT_SCHEDULE
+            self._schedule = schedule if schedule else DEFAULT_AUTOSIZE_RETRY_SCHEDULE
             self._stop = threading.Event()
             # Win32 event mirrored with _stop so the worker's message wait can
             # wake immediately on stop instead of polling a Python flag.
@@ -671,7 +684,6 @@ if QtCore is not None:
             import logging
 
             import pythoncom
-            import pywintypes
             import win32com.client
             import win32con
             import win32event
@@ -695,17 +707,18 @@ if QtCore is not None:
             # feature for the process lifetime.
             shell_state = {"app": None, "retry_at": 0.0}
             identity_registry = _ComIdentityRegistry()
+            loop_count = 0
 
             def ensure_shell_app():
                 if shell_state["app"] is not None:
                     return shell_state["app"]
-                if time.time() < shell_state["retry_at"]:
+                if time.monotonic() < shell_state["retry_at"]:
                     return None
                 try:
                     shell_state["app"] = win32com.client.Dispatch("Shell.Application")
                     log.debug("Explorer autosize worker: Shell.Application is cached.")
                 except Exception as e:
-                    shell_state["retry_at"] = time.time() + 30.0
+                    shell_state["retry_at"] = time.monotonic() + 30.0
                     log.warning(
                         "Explorer autosize worker: Shell.Application creation failed; "
                         "retrying in 30 seconds: %s.",
@@ -723,8 +736,8 @@ if QtCore is not None:
                         doc = getattr(w, "Document", None)
                         if doc is None:
                             return None
-                        return int(getattr(doc, "CurrentViewMode"))
-                    except (pywintypes.com_error, OSError, AttributeError, Exception):
+                        return int(doc.CurrentViewMode)
+                    except Exception:
                         return None
 
                 def iter_tabs():
@@ -768,17 +781,12 @@ if QtCore is not None:
                             return []
                         try:
                             count = windows.Count
-                        except (
-                            pywintypes.com_error,
-                            pythoncom.com_error,
-                            OSError,
-                            Exception,
-                        ) as e:
+                        except Exception as e:
                             log.debug(
                                 "Explorer tab enumeration could not read the window count: %s.", e
                             )
                             shell_state["app"] = None
-                            shell_state["retry_at"] = time.time() + 1.0
+                            shell_state["retry_at"] = time.monotonic() + 1.0
                             return out
 
                         # Enumerate windows with stop check before each Item() call
@@ -791,12 +799,7 @@ if QtCore is not None:
                                 w = windows.Item(i)
                                 if w is not None:
                                     window_list.append(w)
-                            except (
-                                pywintypes.com_error,
-                                pythoncom.com_error,
-                                OSError,
-                                Exception,
-                            ):
+                            except Exception:
                                 item_failures += 1
                                 continue
 
@@ -805,25 +808,20 @@ if QtCore is not None:
                             # expose Count successfully while every Item call
                             # fails. Recreate it on the next poll.
                             shell_state["app"] = None
-                            shell_state["retry_at"] = time.time() + 1.0
+                            shell_state["retry_at"] = time.monotonic() + 1.0
                             return out
 
                         log.debug(
                             "Shell.Application returned %d windows.",
                             len(window_list),
                         )
-                    except (
-                        pywintypes.com_error,
-                        pythoncom.com_error,
-                        OSError,
-                        Exception,
-                    ) as e:
+                    except Exception as e:
                         log.debug("Reading Shell.Application windows failed: %s.", e)
                         # The cached proxy is likely disconnected (Explorer was
                         # restarted). Drop it so ensure_shell_app recreates it
                         # on the next poll instead of reusing a dead proxy.
                         shell_state["app"] = None
-                        shell_state["retry_at"] = time.time() + 1.0
+                        shell_state["retry_at"] = time.monotonic() + 1.0
                         return out
 
                     tab_indices: dict[int, int] = {}
@@ -840,13 +838,7 @@ if QtCore is not None:
                                 break
                             try:
                                 hwnd = int(w.HWND or 0)
-                            except (
-                                pywintypes.com_error,
-                                pythoncom.com_error,
-                                OSError,
-                                AttributeError,
-                                Exception,
-                            ):
+                            except Exception:
                                 continue
 
                             if not hwnd:
@@ -869,12 +861,7 @@ if QtCore is not None:
                                 break
                             try:
                                 path = _resolve_explorer_path(w)
-                            except (
-                                pywintypes.com_error,
-                                pythoncom.com_error,
-                                OSError,
-                                Exception,
-                            ):
+                            except Exception:
                                 path = ""
 
                             if stopping():
@@ -908,12 +895,7 @@ if QtCore is not None:
                                 path,
                                 view_mode,
                             )
-                        except (
-                            pywintypes.com_error,
-                            pythoncom.com_error,
-                            OSError,
-                            Exception,
-                        ) as e:
+                        except Exception as e:
                             log.debug("Processing an Explorer window failed: %s.", e)
                             poll_complete = False
                             continue
@@ -1009,14 +991,12 @@ if QtCore is not None:
                     schedule=self._schedule,
                 )
                 log.debug("Explorer autosize worker: the engine is entering its main loop.")
-                loop_count = 0
-
                 while not self._stop.is_set():
                     # Double-check stop flag before any COM work
                     if self._stop.is_set():
                         break
                     try:
-                        now = time.time()
+                        now = time.monotonic()
                         sleep_for = engine.step(now)
                         loop_count += 1
 
@@ -1050,9 +1030,9 @@ if QtCore is not None:
                     # only for the stop event, an incoming window message
                     # (pumped for the STA), or the timeout. The old loop woke
                     # 200 times per second around the clock.
-                    deadline = time.time() + sleep_for
+                    deadline = time.monotonic() + sleep_for
                     while not self._stop.is_set():
-                        remaining_ms = int((deadline - time.time()) * 1000)
+                        remaining_ms = int((deadline - time.monotonic()) * 1000)
                         if remaining_ms <= 0:
                             break
                         if self._stop_win32_event is None:
@@ -1094,5 +1074,5 @@ if QtCore is not None:
                         pass
                 log.info(
                     "Explorer autosize worker: exiting after %d loops.",
-                    loop_count if "loop_count" in dir() else 0,
+                    loop_count,
                 )

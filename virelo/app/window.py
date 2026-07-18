@@ -10,7 +10,13 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from virelo.app.config import APP_NAME, DEFAULTS, INSTANCE_WINDOW_PROPERTY, normalize_snap_presses
 from virelo.app.webview import VireloWebView
-from virelo.app.window_hit_test import classify_window_hit
+from virelo.app.window_hit_test import (
+    TITLE_BAR_CONTROLS_WIDTH,
+    TITLE_BAR_HEIGHT,
+    TITLE_BAR_INTERACTIVE_WIDTH,
+    classify_physical_window_hit,
+    normalize_hit_test_regions,
+)
 from virelo.bridge import CaptureGuard, VireloBridge
 from virelo.platform.resources import resource_path
 from virelo.platform.startup import ensure_dispatch, startup_shortcut_spec
@@ -111,6 +117,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self._capture_thread = None
         self._capture_worker = None
         self._capture_target = None
+        self._frontend_shortcuts_enabled = True
+        self._shutdown_started = False
+
+        self._hit_test_interactive_width = TITLE_BAR_INTERACTIVE_WIDTH
+        self._hit_test_controls_width = TITLE_BAR_CONTROLS_WIDTH
+        self._hit_test_title_bar_height = TITLE_BAR_HEIGHT
 
         self.is_first_show = True
 
@@ -241,6 +253,9 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QApplication.quit()
 
     def _stop_background_threads(self):
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
         # Let any in-flight folder view registry task finish so it is never
         # killed mid-write during shutdown.
         try:
@@ -268,6 +283,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._capture_guard.try_start():
             self._bridge.snap_status.emit("Key capture already in progress.", 2000)
             return False
+        self._refresh_window_shortcuts()
         try:
             self._capture_target = target
             self._capture_thread = QtCore.QThread(self)
@@ -278,6 +294,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._capture_target = None
             self._capture_thread = None
             self._capture_worker = None
+            self._refresh_window_shortcuts()
             LOG.exception("Key-capture worker construction failed.")
             self._bridge.snap_status.emit("Key capture could not start.", 3000)
             return False
@@ -289,8 +306,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._capture_worker.cancelled.connect(self._on_capture_cancelled)
         self._capture_worker.finished.connect(self._capture_thread.quit)
         self._capture_worker.finished.connect(self._capture_worker.deleteLater)
+        thread = self._capture_thread
         self._capture_thread.finished.connect(self._capture_thread.deleteLater)
-        self._capture_thread.finished.connect(self._on_capture_finished)
+        self._capture_thread.finished.connect(
+            lambda thread=thread: self._on_capture_finished(thread)
+        )
         self._capture_thread.start()
         return True
 
@@ -326,11 +346,16 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 LOG.exception("Cancelling key capture failed.")
 
-    def _on_capture_finished(self) -> None:
+    def _on_capture_finished(self, finished_thread=None) -> None:
+        if finished_thread is not None and finished_thread is not self._capture_thread:
+            return
+        if self._capture_thread is not None and self._capture_thread.isRunning():
+            return
         self._capture_guard.finish()
         self._capture_thread = None
         self._capture_worker = None
         self._capture_target = None
+        self._refresh_window_shortcuts()
 
     def _stop_capture_worker(self) -> None:
         worker = getattr(self, "_capture_worker", None)
@@ -342,30 +367,38 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         if thread is not None:
             thread.quit()
-            thread.wait(2000)
-        self._capture_guard.finish()
-        self._capture_thread = None
-        self._capture_worker = None
-        self._capture_target = None
+            if not thread.wait(2000):
+                LOG.warning("Key capture: the thread did not stop in time; keeping its reference.")
+                return
+            self._on_capture_finished(thread)
+            return
+        self._on_capture_finished()
 
     # ------------------------------------------------------------------
     # Business logic actions.
     # ------------------------------------------------------------------
 
     def _test_snap(self) -> None:
+        if self._capture_guard.is_active:
+            return
         try:
-            if self.shift_mgr.perform(False):
-                self._bridge.snap_status.emit("Snap test applied to the active window.", 2000)
-            else:
-                self._bridge.snap_status.emit("Could not snap the active window.", 2000)
+            result = self._snap_service.test_snap()
+            message = result.get("message", result.get("error", "Could not test snapping."))
+            self._bridge.snap_status.emit(message, 2000)
         except Exception:
-            LOG.exception("Testing a snap on the active window failed.")
-            self._bridge.snap_status.emit("Could not snap the active window.", 2000)
+            LOG.exception("Testing a snap on Virelo failed.")
+            self._bridge.snap_status.emit("Could not test snapping.", 2000)
 
     def _set_modal_shortcuts_enabled(self, enabled: bool) -> None:
         """Enable native shortcuts only when no frontend confirmation is modal."""
+        self._frontend_shortcuts_enabled = bool(enabled)
+        self._refresh_window_shortcuts()
+
+    def _refresh_window_shortcuts(self) -> None:
+        """Keep native shortcuts disabled during a modal or key capture."""
+        enabled = self._frontend_shortcuts_enabled and not self._capture_guard.is_active
         for shortcut in self._window_shortcuts:
-            shortcut.setEnabled(bool(enabled))
+            shortcut.setEnabled(enabled)
 
     def _show_help(self):
         QtWidgets.QMessageBox.information(
@@ -493,17 +526,40 @@ class MainWindow(QtWidgets.QMainWindow):
     # Resizable window through ``WM_NCHITTEST``.
     # ------------------------------------------------------------------
 
+    def set_hit_test_regions(
+        self,
+        interactive_width: int,
+        controls_width: int,
+        title_bar_height: int,
+    ) -> None:
+        """Store frontend-measured chrome regions in device-independent pixels."""
+        interactive_width, controls_width, title_bar_height = normalize_hit_test_regions(
+            interactive_width,
+            controls_width,
+            title_bar_height,
+        )
+        self._hit_test_interactive_width = interactive_width
+        self._hit_test_controls_width = controls_width
+        self._hit_test_title_bar_height = title_bar_height
+
     def nativeEvent(self, event_type, message):
         if event_type == b"windows_generic_MSG":
             msg = ctypes.wintypes.MSG.from_address(int(message))
             if msg.message == 0x0084:  # WM_NCHITTEST
                 x = ctypes.c_short(msg.lParam & 0xFFFF).value
                 y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
-                # Convert screen coordinates to window coordinates.
-                pos = self.mapFromGlobal(QtCore.QPoint(x, y))
-                rect = self.rect()
-                result = classify_window_hit(pos.x(), pos.y(), rect.width(), rect.height())
-                if result:
-                    return True, result
+                rect = ctypes.wintypes.RECT()
+                if USER32.GetWindowRect(msg.hwnd, ctypes.byref(rect)):
+                    result = classify_physical_window_hit(
+                        x,
+                        y,
+                        (rect.left, rect.top, rect.right, rect.bottom),
+                        self.devicePixelRatioF(),
+                        interactive_width=self._hit_test_interactive_width,
+                        controls_width=self._hit_test_controls_width,
+                        title_bar_height=self._hit_test_title_bar_height,
+                    )
+                    if result:
+                        return True, result
 
         return super().nativeEvent(event_type, message)

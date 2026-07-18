@@ -8,14 +8,17 @@ values.
 """
 
 import json
+from typing import ClassVar
 
-from virelo.app.config import DEFAULTS, normalize_snap_presses
+from virelo.app.config import (
+    DEFAULTS,
+    normalize_accent,
+    normalize_density,
+    normalize_snap_presses,
+)
 from virelo.platform.theme import normalize_theme_mode
 from virelo.settings.key_validation import normalize_key_name, validate_key_pair
 from virelo.settings.persistence import Settings
-
-_VALID_ACCENTS = ("slate", "teal", "blue", "rust", "purple")
-_VALID_DENSITIES = ("compact", "cozy", "comfortable")
 
 
 def _strict_bool(value):
@@ -53,7 +56,7 @@ class SettingsState:
     """
 
     # This exhaustive key list maps names to a coercer and optional valid range.
-    KEYS = {
+    KEYS: ClassVar[dict] = {
         "snap_key": (normalize_key_name, None),
         "restore_key": (normalize_key_name, None),
         "enable_snap": (_strict_bool, None),
@@ -95,6 +98,8 @@ class SettingsState:
         result["snap_key"], result["restore_key"] = validate_key_pair(
             result["snap_key"], result["restore_key"]
         )
+        result["accent"] = normalize_accent(result["accent"])
+        result["density"] = normalize_density(result["density"])
         return result
 
     def get_json(self) -> str:
@@ -105,6 +110,12 @@ class SettingsState:
     def has_draft(self) -> bool:
         """Return whether unsaved changes exist."""
         return self._draft is not None and len(self._draft) > 0
+
+    def get_persisted(self, key: str):
+        """Return one persisted setting without exposing the storage object."""
+        if key not in self.KEYS:
+            raise KeyError(f"Unknown settings key: {key!r}.")
+        return getattr(self._settings, key)
 
     def apply_draft(self, data: dict) -> dict:
         """Validate and store changes in draft (not persisted).
@@ -178,13 +189,9 @@ class SettingsState:
             if key == "snap_presses":
                 coerced = normalize_snap_presses(coerced)
             if key == "accent":
-                coerced = coerced.strip().lower()
-                if coerced not in _VALID_ACCENTS:
-                    coerced = DEFAULTS["accent"]
+                coerced = normalize_accent(coerced)
             if key == "density":
-                coerced = coerced.strip().lower()
-                if coerced not in _VALID_DENSITIES:
-                    coerced = DEFAULTS["density"]
+                coerced = normalize_density(coerced)
             validated[key] = coerced
 
         if "snap_key" in validated or "restore_key" in validated:

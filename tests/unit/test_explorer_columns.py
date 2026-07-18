@@ -8,8 +8,9 @@ import pytest
 
 def test_partial_column_autosize_is_not_deduplicated(monkeypatch):
     """One successful column cannot hide failures in the remaining columns."""
-    if sys.platform != "win32":
-        pytest.skip("Explorer COM integration is Windows-only.")
+    comtypes_module = sys.modules.get("comtypes")
+    if sys.platform != "win32" or not hasattr(comtypes_module, "GUID"):
+        pytest.skip("The real Windows comtypes ABI is required.")
 
     from virelo.services import explorer_columns
 

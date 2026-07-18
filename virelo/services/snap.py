@@ -27,6 +27,7 @@ from virelo.platform.win32_helpers import (
     _exit_fullscreen,
     _get_window_dwm_rect,
     _is_window_fullscreen,
+    _is_window_interactive,
     _should_skip_snap_for_game,
     get_monitor_rect,
 )
@@ -37,6 +38,7 @@ LOG = logging.getLogger("Virelo")
 _CENTER_ONLY_EXECUTABLES = frozenset({"googledrivefs.exe", "lightbulb.exe"})
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _WINDOW_IDENTITY_PROPERTY = "Virelo.SnapRestoreIdentity"
+_TEST_TARGET_SCAN_LIMIT = 512
 
 
 def window_border_deltas(
@@ -277,7 +279,7 @@ class MultiPressHotkeyListener(QtCore.QObject):
             return
         if not self.settings.enable_snap:
             return
-        now = time.time()
+        now = time.monotonic()
         # Recover from a lost release event (focus steal, UAC prompt, session
         # switch). A genuinely held key produces auto-repeat press events well
         # under a second apart, so a long-silent "held" state is stale.
@@ -376,13 +378,69 @@ class SnapRestoreController(QtCore.QObject):
             LOG.exception("SnapRestoreController.perform failed.", exc_info=e)
             return False
 
-    def _snap(self, hwnd: int) -> bool:
+    @staticmethod
+    def _virelo_window_handles() -> set[int]:
+        """Return every live Qt top-level HWND owned by Virelo."""
         from PySide6 import QtWidgets
 
+        handles = set()
         for widget in QtWidgets.QApplication.topLevelWidgets():
-            if int(widget.winId()) == hwnd:
-                LOG.debug("Snap: skipping Virelo's own window hwnd=%s.", hwnd)
-                return False  # Skip Virelo's own window per SNAP-03.
+            try:
+                handles.add(int(widget.winId()))
+            except Exception:
+                continue
+        return handles
+
+    def _is_eligible_test_target(self, hwnd: int, virelo_handles: set[int]) -> bool:
+        """Return whether a z-order candidate is safe for an explicit test snap."""
+        if not hwnd or hwnd in virelo_handles:
+            return False
+        try:
+            if win32gui.GetParent(hwnd):
+                return False
+            if not str(win32gui.GetWindowText(hwnd) or "").strip():
+                return False
+            if win32gui.GetClassName(hwnd) in self._SHELL_CLASSES:
+                return False
+        except Exception:
+            return False
+        return bool(_is_window_interactive(hwnd))
+
+    def find_test_snap_target(self) -> int | None:
+        """Return the first eligible non-Virelo window in foreground z-order."""
+        virelo_handles = self._virelo_window_handles()
+        try:
+            hwnd = handle_value(USER32.GetForegroundWindow())
+        except Exception:
+            return None
+        visited: set[int] = set()
+        for _ in range(_TEST_TARGET_SCAN_LIMIT):
+            if not hwnd or hwnd in visited:
+                return None
+            visited.add(hwnd)
+            if self._is_eligible_test_target(hwnd, virelo_handles):
+                return hwnd
+            try:
+                hwnd = int(win32gui.GetWindow(hwnd, win32con.GW_HWNDNEXT) or 0)
+            except Exception:
+                return None
+        return None
+
+    def snap_window_for_test(self, hwnd: int) -> bool:
+        """Snap one explicitly selected external window after revalidating it."""
+        self._prune_closed_windows()
+        if not self._is_eligible_test_target(hwnd, self._virelo_window_handles()):
+            return False
+        try:
+            return bool(self._snap(hwnd))
+        except Exception as error:
+            LOG.exception("The explicit test snap failed.", exc_info=error)
+            return False
+
+    def _snap(self, hwnd: int) -> bool:
+        if hwnd in self._virelo_window_handles():
+            LOG.debug("Snap: skipping Virelo's own window hwnd=%s.", hwnd)
+            return False  # Skip Virelo's own window per SNAP-03.
 
         def refresh_rect():
             rect = wintypes.RECT()
@@ -461,7 +519,6 @@ class SnapRestoreController(QtCore.QObject):
         monitor_height = int(bottom_edge - top_edge)
 
         # Restore a non-game fullscreen window before moving it.
-        style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
         pre_move_mutated = False
         if full_screen:
             ensure_restore_record()
@@ -469,16 +526,19 @@ class SnapRestoreController(QtCore.QObject):
             pre_move_mutated = True
             rc = refresh_rect()
 
-        process_name = _window_process_name(hwnd)
-        is_resizable = bool(style & win32con.WS_SIZEBOX)
-        center_only = should_center_without_resize(style, process_name)
-
         placement = win32gui.GetWindowPlacement(hwnd)
         if placement[1] == win32con.SW_MAXIMIZE:
             ensure_restore_record()
             win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
             pre_move_mutated = True
             rc = refresh_rect()
+
+        # Fullscreen and maximized applications can restore their resizable
+        # frame only after leaving that state, so classify the current style.
+        style = win32gui.GetWindowLong(hwnd, win32con.GWL_STYLE)
+        process_name = _window_process_name(hwnd)
+        is_resizable = bool(style & win32con.WS_SIZEBOX)
+        center_only = should_center_without_resize(style, process_name)
 
         border_deltas = window_border_deltas(
             (rc.left, rc.top, rc.right, rc.bottom), _get_window_dwm_rect(hwnd)
@@ -661,14 +721,23 @@ class SnapService:
         self._listener = listener
 
     def test_snap(self) -> dict:
-        """Trigger a test snap (same as pressing "Test snap" button)."""
+        """Snap the first safe external window behind the settings window."""
         if self._mgr is None:
             return {"ok": False, "error": "The snap manager is not initialized."}
         try:
-            acted = self._mgr.perform(False)
+            target = self._mgr.find_test_snap_target()
+            if target is None:
+                return {
+                    "ok": False,
+                    "error": (
+                        "No window is eligible behind Virelo. "
+                        "Open or restore another window, then try again."
+                    ),
+                }
+            acted = self._mgr.snap_window_for_test(target)
             if acted:
-                return {"ok": True, "message": "Snap test applied to the active window."}
-            return {"ok": False, "error": "No window was snapped (nothing eligible in front)."}
+                return {"ok": True, "message": "Snap test applied to the last eligible window."}
+            return {"ok": False, "error": "The selected window could not be snapped."}
         except Exception as e:
             LOG.exception("The snap test failed.")
             return {"ok": False, "error": str(e)}

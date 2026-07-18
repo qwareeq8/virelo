@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import win32con
@@ -16,6 +17,7 @@ from virelo.services import snap
 from virelo.services.snap import (
     MultiPressHotkeyListener,
     SnapRestoreController,
+    SnapService,
     calculate_center_position,
     should_center_without_resize,
 )
@@ -59,12 +61,97 @@ def test_listener_ignores_snap_key_while_capture_guard_is_active(monkeypatch) ->
     def fail_if_snap_logic_runs():
         raise AssertionError("Capture reached snap timing logic.")
 
-    monkeypatch.setattr(snap.time, "time", fail_if_snap_logic_runs)
+    monkeypatch.setattr(snap.time, "monotonic", fail_if_snap_logic_runs)
 
     listener._on_press(None)
 
     assert listener._held is False
     assert list(listener._press_times) == []
+
+
+def test_test_snap_selects_the_first_safe_external_window_in_z_order(monkeypatch) -> None:
+    """The target skips Virelo, shell, hidden, owned, and untitled windows."""
+    controller = SnapRestoreController(_settings())
+    monkeypatch.setattr(
+        QtWidgets,
+        "QApplication",
+        SimpleNamespace(topLevelWidgets=lambda: [SimpleNamespace(winId=lambda: 10)]),
+        raising=False,
+    )
+    monkeypatch.setattr(snap, "USER32", SimpleNamespace(GetForegroundWindow=lambda: 10))
+    z_order = {10: 20, 20: 30, 30: 35, 35: 37, 37: 40, 40: 0}
+    monkeypatch.setattr(
+        snap.win32gui,
+        "GetWindow",
+        lambda hwnd, relation: z_order[hwnd] if relation == win32con.GW_HWNDNEXT else 0,
+    )
+    monkeypatch.setattr(
+        snap.win32gui,
+        "GetClassName",
+        lambda hwnd: "WorkerW" if hwnd == 20 else "ApplicationWindow",
+    )
+    monkeypatch.setattr(snap.win32gui, "GetParent", lambda hwnd: 999 if hwnd == 35 else 0)
+    monkeypatch.setattr(
+        snap.win32gui,
+        "GetWindowText",
+        lambda hwnd: "   " if hwnd == 37 else f"Window {hwnd}",
+    )
+    monkeypatch.setattr(snap, "_is_window_interactive", lambda hwnd: hwnd != 30)
+
+    assert controller.find_test_snap_target() == 40
+
+
+def test_test_snap_never_selects_virelo_itself(monkeypatch) -> None:
+    """A foreground Virelo window is not a fallback when no external target exists."""
+    controller = SnapRestoreController(_settings())
+    monkeypatch.setattr(
+        QtWidgets,
+        "QApplication",
+        SimpleNamespace(topLevelWidgets=lambda: [SimpleNamespace(winId=lambda: 10)]),
+        raising=False,
+    )
+    monkeypatch.setattr(snap, "USER32", SimpleNamespace(GetForegroundWindow=lambda: 10))
+    monkeypatch.setattr(snap.win32gui, "GetWindow", lambda _hwnd, _relation: 0)
+    monkeypatch.setattr(snap.win32gui, "GetClassName", lambda _hwnd: "VireloWindow")
+    monkeypatch.setattr(snap, "_is_window_interactive", lambda _hwnd: True)
+
+    assert controller.find_test_snap_target() is None
+    assert controller._snap(10) is False
+
+
+def test_snap_service_uses_the_explicit_external_test_target() -> None:
+    """The service snaps the selected HWND without consulting foreground state again."""
+    manager = SimpleNamespace(
+        find_test_snap_target=MagicMock(return_value=40),
+        snap_window_for_test=MagicMock(return_value=True),
+        perform=MagicMock(),
+    )
+    service = SnapService(manager)
+
+    assert service.test_snap() == {
+        "ok": True,
+        "message": "Snap test applied to the last eligible window.",
+    }
+    manager.find_test_snap_target.assert_called_once_with()
+    manager.snap_window_for_test.assert_called_once_with(40)
+    manager.perform.assert_not_called()
+
+
+def test_snap_service_reports_when_no_external_test_target_exists() -> None:
+    """The service gives actionable feedback instead of snapping Virelo as a fallback."""
+    manager = SimpleNamespace(
+        find_test_snap_target=MagicMock(return_value=None),
+        snap_window_for_test=MagicMock(),
+    )
+    service = SnapService(manager)
+
+    assert service.test_snap() == {
+        "ok": False,
+        "error": (
+            "No window is eligible behind Virelo. Open or restore another window, then try again."
+        ),
+    }
+    manager.snap_window_for_test.assert_not_called()
 
 
 def test_listener_rejects_same_snap_and_restore_key_without_unhooking(monkeypatch) -> None:
@@ -241,6 +328,30 @@ def test_google_drive_is_centered_at_current_size(monkeypatch) -> None:
     assert controller._snap(42)
 
     assert user32.moves == [(560, 220, 800, 600)]
+
+
+def test_fullscreen_exit_refreshes_resizable_window_style(monkeypatch) -> None:
+    """A restored fullscreen window uses its post-exit resize frame for snapping."""
+    user32 = _FakeUser32()
+    _patch_snap_runtime(monkeypatch, user32, process_name="ordinary.exe")
+    fullscreen_state = {"exited": False}
+    monkeypatch.setattr(snap, "_is_window_fullscreen", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        snap,
+        "_exit_fullscreen",
+        lambda _hwnd: fullscreen_state.__setitem__("exited", True),
+    )
+    monkeypatch.setattr(
+        snap.win32gui,
+        "GetWindowLong",
+        lambda _hwnd, _index: win32con.WS_SIZEBOX if fullscreen_state["exited"] else 0,
+    )
+    controller = SnapRestoreController(_settings())
+
+    assert controller._snap(42)
+
+    assert fullscreen_state["exited"] is True
+    assert user32.moves[0][2:] == (1920 * 76 // 100, 1040 * 76 // 100)
 
 
 def test_manual_move_between_snaps_refreshes_restore_geometry(monkeypatch) -> None:

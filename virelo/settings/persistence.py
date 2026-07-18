@@ -4,7 +4,14 @@ import logging
 
 from PySide6 import QtCore
 
-from virelo.app.config import APP_NAME, DEFAULTS, ORGANIZATION, SETTINGS_GROUP
+from virelo.app.config import (
+    APP_NAME,
+    DEFAULTS,
+    ORGANIZATION,
+    SETTINGS_GROUP,
+    normalize_accent,
+    normalize_density,
+)
 from virelo.platform.theme import normalize_theme_mode
 from virelo.settings.key_validation import validate_key_pair
 
@@ -71,8 +78,8 @@ class Settings:
             self._qs.value("theme", DEFAULTS["theme"], str),
             DEFAULTS["theme"],
         )
-        self.accent = str(self._qs.value("accent", DEFAULTS["accent"], str))
-        self.density = str(self._qs.value("density", DEFAULTS["density"], str))
+        self.accent = normalize_accent(self._qs.value("accent", DEFAULTS["accent"], str))
+        self.density = normalize_density(self._qs.value("density", DEFAULTS["density"], str))
         self.minimize_to_tray = _safe_bool(
             self._qs.value("minimize_to_tray", DEFAULTS["minimize_to_tray"], bool),
             DEFAULTS["minimize_to_tray"],

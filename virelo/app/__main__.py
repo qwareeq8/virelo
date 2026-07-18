@@ -2,11 +2,13 @@
 
 import argparse
 import atexit
+import ctypes
 import json
 import logging
 import os
 import platform
 import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -75,8 +77,8 @@ def _init_logger() -> logging.Logger:
             console_handler = h
             break
 
-    if console_handler is None:
-        console_handler = logging.StreamHandler()
+    if console_handler is None and sys.stderr is not None:
+        console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
         console_handler.setLevel(logging.INFO)  # The console shows INFO and higher levels.
         logger.addHandler(console_handler)
@@ -103,7 +105,10 @@ def _instance_already_running() -> bool:
     if handle:
         KERNEL32.CloseHandle(handle)
         return True
-    return False
+    # A filtered non-administrator token may be unable to open an elevated
+    # instance's mutex. Access denied still proves that the named object exists.
+    get_last_error = getattr(ctypes, "get_last_error", None)
+    return bool(get_last_error is not None and get_last_error() == 5)
 
 
 def _remove_current_user_startup_shortcut() -> int:
@@ -144,9 +149,55 @@ def _focus_running_instance() -> None:
         USER32.EnumWindows(find_marked_window, 0)
         hwnd = found
         if hwnd:
-            SW_SHOW = 5
-            USER32.ShowWindow(hwnd, SW_SHOW)
+            SW_RESTORE = 9
+            USER32.ShowWindow(hwnd, SW_RESTORE)
             USER32.SetForegroundWindow(hwnd)
+    except Exception:
+        pass
+
+
+def _notify_already_running(logger: logging.Logger) -> None:
+    """Focus and report an existing instance from either launch race path."""
+    _focus_running_instance()
+    logger.info("Virelo is already running; focusing the existing window.")
+    try:
+        MB_ICONINFORMATION = 0x40
+        USER32.MessageBoxW(
+            None,
+            "Virelo is already running. Check the system tray.",
+            APP_NAME,
+            MB_ICONINFORMATION,
+        )
+    except Exception:
+        pass
+
+
+def _elevation_target_and_arguments(
+    executable: str,
+    argv: list[str],
+    *,
+    frozen: bool,
+) -> tuple[str, str]:
+    """Return an elevation target and Windows-quoted argument string."""
+    if frozen:
+        return executable, subprocess.list2cmdline(argv[1:])
+    script = os.path.abspath(argv[0])
+    target = select_pythonw_executable(executable)
+    return target, subprocess.list2cmdline([script, *argv[1:]])
+
+
+def _report_elevation_failure(logger: logging.Logger, result: object) -> None:
+    """Report a failed or cancelled UAC elevation without assuming a console."""
+    message = "Virelo could not start because administrator elevation was cancelled or failed."
+    if sys.stderr is not None:
+        try:
+            sys.stderr.write(f"{message}\n")
+        except Exception:
+            pass
+    logger.error("Elevation failed. ShellExecuteW returned %s.", result)
+    try:
+        MB_ICONERROR = 0x10
+        USER32.MessageBoxW(None, message, APP_NAME, MB_ICONERROR)
     except Exception:
         pass
 
@@ -531,7 +582,7 @@ def main() -> None:
     _CRASH_LOG = None
     try:
         crash_log_path = os.path.join(os.path.dirname(getattr(LOG, "log_path", "")), "crash.log")
-        _CRASH_LOG = open(crash_log_path, "a", encoding="utf-8")  # noqa: SIM115
+        _CRASH_LOG = open(crash_log_path, "a", encoding="utf-8")
         faulthandler.enable(_CRASH_LOG)
     except Exception:
         try:
@@ -552,35 +603,18 @@ def main() -> None:
     # Detect an already-running instance before elevating so a second launch
     # does not show a pointless UAC prompt and then exit silently.
     if _instance_already_running():
-        _focus_running_instance()
-        LOG.info("Virelo is already running; focusing the existing window.")
-        try:
-            MB_ICONINFORMATION = 0x40
-            USER32.MessageBoxW(
-                None,
-                "Virelo is already running. Check the system tray.",
-                APP_NAME,
-                MB_ICONINFORMATION,
-            )
-        except Exception:
-            pass
+        _notify_already_running(LOG)
         return
 
     if not _is_admin():
-        params = " ".join([f'"{arg}"' for arg in sys.argv[1:]])
-        if getattr(sys, "frozen", False):
-            # In a frozen build, the executable is the app. Passing the script path again
-            # would inject a bogus argv[1] into the elevated child.
-            exe = sys.executable
-            arguments = params
-        else:
-            script = os.path.abspath(sys.argv[0])
-            exe = select_pythonw_executable(sys.executable)
-            arguments = f'"{script}" {params}'
+        exe, arguments = _elevation_target_and_arguments(
+            sys.executable,
+            sys.argv,
+            frozen=bool(getattr(sys, "frozen", False)),
+        )
         hinst = SHELL32.ShellExecuteW(None, "runas", exe, arguments, None, 1)
         if handle_value(hinst) <= 32:
-            sys.stderr.write("Elevation failed.\n")
-            LOG.error("Elevation failed. ShellExecuteW returned %s.", hinst)
+            _report_elevation_failure(LOG, hinst)
             return
         return  # The elevated child will run the app.
 
@@ -590,9 +624,9 @@ def main() -> None:
     from PySide6 import QtCore, QtWidgets
 
     from virelo.app.window import MainWindow
-    from virelo.platform.win32_helpers import _enable_dpi_awareness
 
-    _enable_dpi_awareness()
+    # Qt 6 establishes Per-Monitor V2 awareness when QApplication initializes.
+    # Calling the legacy SHCore API first would lock the process to Per-Monitor V1.
     try:
         SHELL32.SetCurrentProcessExplicitAppUserModelID("com.yusufqwareeq.virelo")
     except Exception:
@@ -603,6 +637,7 @@ def main() -> None:
 
     mutex = win32event.CreateMutex(None, False, f"Global\\{APP_NAME}_Mutex")
     if win32api.GetLastError() == winerror.ERROR_ALREADY_EXISTS:
+        _notify_already_running(LOG)
         return
 
     app = QtWidgets.QApplication(sys.argv)
@@ -614,8 +649,14 @@ def main() -> None:
         return
     win = MainWindow()
 
+    shutdown_started = False
+
     def _shutdown():
         """Idempotent teardown: stop workers and unhook the global hotkeys."""
+        nonlocal shutdown_started
+        if shutdown_started:
+            return
+        shutdown_started = True
         try:
             win._stop_background_threads()
         except Exception:

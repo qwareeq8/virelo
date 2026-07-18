@@ -19,6 +19,7 @@ from virelo.services.explorer_views import (
     _copy_key_tree,
     _delete_key_tree,
     _key_exists,
+    _prune_registry_backups,
     backup_dir_name,
     this_pc_bag_values,
     top_view_values,
@@ -82,6 +83,123 @@ def test_backup_dir_name_is_timestamped():
     """Backup directories sort chronologically and are unique below one second."""
     name = backup_dir_name(datetime(2026, 7, 16, 13, 5, 9, 123456))
     assert name == "view-backup-20260716-130509-123456"
+
+
+def test_backup_retention_keeps_newest_ten_and_ignores_unrelated_paths(tmp_path):
+    """Retention removes only old directories matching Virelo's exact backup pattern."""
+    backup_names = [f"view-backup-202607{day:02d}-130509-123456" for day in range(1, 13)]
+    for name in backup_names:
+        (tmp_path / name).mkdir()
+    unrelated = tmp_path / "view-backup-manual"
+    unrelated.mkdir()
+    matching_file = tmp_path / "view-backup-20260630-130509-123456"
+    matching_file.write_text("not a directory", encoding="utf-8")
+
+    _prune_registry_backups(str(tmp_path))
+
+    remaining = {entry.name for entry in tmp_path.iterdir() if entry.is_dir()}
+    assert remaining == {*backup_names[-10:], unrelated.name}
+    assert matching_file.is_file()
+
+
+def test_backup_retention_rejects_candidate_resolving_outside_base(monkeypatch, tmp_path):
+    """A reparse-style resolved path cannot escape the application data directory."""
+    newest = tmp_path / "view-backup-20260712-130509-123456"
+    escaped = tmp_path / "view-backup-20260701-130509-123456"
+    newest.mkdir()
+    escaped.mkdir()
+    realpath = explorer_views.os.path.realpath
+
+    def resolve(path):
+        if explorer_views.os.path.abspath(path) == str(escaped):
+            return str(tmp_path.parent / "outside" / escaped.name)
+        return realpath(path)
+
+    monkeypatch.setattr(explorer_views.os.path, "realpath", resolve)
+
+    _prune_registry_backups(str(tmp_path), keep=1)
+
+    assert escaped.is_dir()
+
+
+def test_backup_retention_preserves_current_backup_across_clock_changes(tmp_path):
+    """Future-dated existing directories cannot evict the backup just created."""
+    current = tmp_path / "view-backup-20250101-010101-000001"
+    current.mkdir()
+    for day in range(1, 11):
+        (tmp_path / f"view-backup-209901{day:02d}-010101-000001").mkdir()
+
+    _prune_registry_backups(str(tmp_path), protected=str(current))
+
+    assert current.is_dir()
+    assert len([entry for entry in tmp_path.iterdir() if entry.is_dir()]) == 10
+
+
+def test_registry_backup_is_published_only_after_every_export(monkeypatch, tmp_path):
+    """Successful exports move one hidden staging directory to the final name atomically."""
+    base = tmp_path / "Virelo"
+    keys = (r"Software\Virelo\First", r"Software\Virelo\Second")
+    rename_calls = []
+    real_rename = explorer_views.os.rename
+
+    def export_key(command, **_kwargs):
+        out_file = os.fspath(command[3])
+        parent = os.path.dirname(out_file)
+        assert os.path.basename(parent).startswith(".view-backup-")
+        assert "-staging-" in os.path.basename(parent)
+        assert not list(base.glob("view-backup-*"))
+        with open(out_file, "wb") as stream:
+            stream.write(b"Windows Registry Editor Version 5.00\r\n")
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    def rename(source, target):
+        rename_calls.append((source, target))
+        return real_rename(source, target)
+
+    monkeypatch.setenv("LOCALAPPDATA", os.fspath(tmp_path))
+    monkeypatch.setattr(explorer_views, "BACKUP_KEYS", keys)
+    monkeypatch.setattr(explorer_views, "_open_winreg", object)
+    monkeypatch.setattr(explorer_views.subprocess, "run", export_key)
+    monkeypatch.setattr(explorer_views.os, "rename", rename)
+
+    target = explorer_views._backup_registry_state()
+
+    target_path = os.path.abspath(target)
+    assert len(rename_calls) == 1
+    assert os.path.basename(rename_calls[0][0]).startswith(".view-backup-")
+    assert os.path.abspath(rename_calls[0][1]) == target_path
+    assert sorted(os.listdir(target_path)) == ["00-First.reg", "01-Second.reg"]
+    assert [entry.name for entry in base.iterdir()] == [os.path.basename(target_path)]
+
+
+def test_registry_backup_failure_removes_incomplete_staging_directory(monkeypatch, tmp_path):
+    """A failed export leaves neither a retained backup nor a hidden staging directory."""
+    import pytest
+
+    base = tmp_path / "Virelo"
+    keys = (r"Software\Virelo\First", r"Software\Virelo\Second")
+    call_count = 0
+
+    def export_key(command, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            with open(command[3], "wb") as stream:
+                stream.write(b"partial")
+            return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+        return subprocess.CompletedProcess(command, 1, stdout=b"", stderr=b"access denied")
+
+    monkeypatch.setenv("LOCALAPPDATA", os.fspath(tmp_path))
+    monkeypatch.setattr(explorer_views, "BACKUP_KEYS", keys)
+    monkeypatch.setattr(explorer_views, "_open_winreg", object)
+    monkeypatch.setattr(explorer_views, "_key_exists", lambda _winreg, _key: True)
+    monkeypatch.setattr(explorer_views.subprocess, "run", export_key)
+
+    with pytest.raises(RuntimeError, match=r"Backup of existing key HKCU\\Software"):
+        explorer_views._backup_registry_state()
+
+    assert base.is_dir()
+    assert list(base.iterdir()) == []
 
 
 def test_windows_utilities_resolve_from_system32(monkeypatch):

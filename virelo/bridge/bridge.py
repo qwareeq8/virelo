@@ -140,8 +140,10 @@ class VireloBridge(QObject):
         try:
             candidate = self._state.get_all()
             if self._main_window is not None and hasattr(self._main_window, "_hotkey_listener"):
-                settings = self._state._settings
-                previous_hotkeys = (settings.snap_key, settings.restore_key)
+                previous_hotkeys = (
+                    self._state.get_persisted("snap_key"),
+                    self._state.get_persisted("restore_key"),
+                )
                 desired_hotkeys = (candidate["snap_key"], candidate["restore_key"])
                 if desired_hotkeys != previous_hotkeys:
                     if not self._main_window._hotkey_listener.update_keys(*desired_hotkeys):
@@ -194,7 +196,7 @@ class VireloBridge(QObject):
             self.settings_changed.emit(self._settings_json(transaction_id))
             self.dirty_changed.emit(False)
             if self._main_window:
-                persisted_theme = self._state._settings.theme
+                persisted_theme = self._state.get_persisted("theme")
                 self._main_window._apply_theme_mode(persisted_theme)
             return json.dumps({"ok": True, "data": self._state.get_all()})
         except Exception as e:
@@ -213,8 +215,10 @@ class VireloBridge(QObject):
         previous_hotkeys = None
         try:
             if self._main_window is not None and hasattr(self._main_window, "_hotkey_listener"):
-                settings = self._state._settings
-                previous_hotkeys = (settings.snap_key, settings.restore_key)
+                previous_hotkeys = (
+                    self._state.get_persisted("snap_key"),
+                    self._state.get_persisted("restore_key"),
+                )
                 desired_hotkeys = (DEFAULTS["snap_key"], DEFAULTS["restore_key"])
                 if desired_hotkeys != previous_hotkeys:
                     if not self._main_window._hotkey_listener.update_keys(*desired_hotkeys):
@@ -253,7 +257,7 @@ class VireloBridge(QObject):
 
     @Slot(result=str)
     def test_snap(self) -> str:
-        """Trigger a test snap on the active window."""
+        """Snap the first safe external window behind Virelo in z-order."""
         try:
             result = self._snap.test_snap()
             msg = result.get("message", result.get("error", ""))
@@ -417,6 +421,26 @@ class VireloBridge(QObject):
             LOG.exception("The %r window command failed.", command)
             return json.dumps({"ok": False, "error": str(e)})
 
+    @Slot(int, int, int, result=str)
+    def set_hit_test_regions(
+        self,
+        interactive_width: int,
+        controls_width: int,
+        title_bar_height: int,
+    ) -> str:
+        """Update measured frontend chrome regions used by native hit testing."""
+        if self._main_window is None:
+            return json.dumps({"ok": False, "error": "The main window is not ready."})
+        try:
+            self._main_window.set_hit_test_regions(
+                interactive_width,
+                controls_width,
+                title_bar_height,
+            )
+            return json.dumps({"ok": True})
+        except (TypeError, ValueError) as error:
+            return json.dumps({"ok": False, "error": str(error)})
+
     # Internal helpers.
 
     def _apply_side_effects(self, applied: dict, *, hotkeys_already_applied: bool = False) -> None:
@@ -445,10 +469,11 @@ class VireloBridge(QObject):
             mw._apply_theme_mode(applied["theme"])
 
         if "run_at_startup" in applied:
+            enabled = bool(applied["run_at_startup"])
             try:
                 from virelo.app.window import sync_startup_shortcut
 
-                sync_startup_shortcut(bool(applied["run_at_startup"]))
+                sync_startup_shortcut(enabled)
             except Exception:
                 LOG.exception("Updating the startup shortcut failed.")
                 self.snap_status.emit(
@@ -456,11 +481,10 @@ class VireloBridge(QObject):
                     "updated. Virelo will retry at the next launch.",
                     8000,
                 )
+            mw.action_run_at_startup.setChecked(enabled)
 
         if "minimize_to_tray" in applied:
             mw.minimize_to_tray_on_exit = bool(applied["minimize_to_tray"])
 
-        if "run_at_startup" in applied:
-            mw.action_run_at_startup.setChecked(bool(applied["run_at_startup"]))
         if "minimize_to_tray" in applied:
             mw.action_minimize_on_exit.setChecked(bool(applied["minimize_to_tray"]))

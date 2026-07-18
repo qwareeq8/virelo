@@ -23,6 +23,9 @@ DEFAULTS = {
     "minimize_to_tray": True,
 }
 
+VALID_ACCENTS = ("slate", "teal", "blue", "rust", "purple")
+VALID_DENSITIES = ("compact", "cozy", "comfortable")
+
 
 def normalize_snap_presses(value):
     """Coerce a press count to an integer from 1 to 10."""
@@ -31,3 +34,15 @@ def normalize_snap_presses(value):
     except Exception:
         return DEFAULTS["snap_presses"]
     return max(1, min(10, val))
+
+
+def normalize_accent(value):
+    """Return a supported accent name, falling back to the default."""
+    accent = str(value or "").strip().lower()
+    return accent if accent in VALID_ACCENTS else DEFAULTS["accent"]
+
+
+def normalize_density(value):
+    """Return a supported density name, falling back to the default."""
+    density = str(value or "").strip().lower()
+    return density if density in VALID_DENSITIES else DEFAULTS["density"]

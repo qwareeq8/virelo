@@ -22,6 +22,7 @@ import comtypes.client
 from comtypes import COMMETHOD, GUID, HRESULT, POINTER, IUnknown, byref, cast
 
 from virelo.platform.paths import canonicalize_path, resolve_explorer_location
+from virelo.services.explorer_constants import FVM_DETAILS
 
 LOG = logging.getLogger("Virelo")
 
@@ -30,7 +31,7 @@ class IServiceProvider(IUnknown):
     """Declare the pointer-safe COM ``IServiceProvider`` interface."""
 
     _iid_ = GUID("{6D5140C1-7436-11CE-8034-00AA006009FA}")
-    _methods_ = [
+    _methods_ = [  # noqa: RUF012 - comtypes requires mutable class metadata.
         COMMETHOD(
             [],
             HRESULT,
@@ -75,8 +76,6 @@ CM_ENUM_VISIBLE = 0x00000002
 
 CM_WIDTH_AUTOSIZE = -2
 
-FVM_DETAILS = 4
-
 FOLDERVIEWMODE_NAMES = {
     -1: "FVM_AUTO",
     1: "FVM_ICON",
@@ -96,7 +95,7 @@ class IColumnManager(IUnknown):
     """Declare the COM interface used to inspect and resize Explorer columns."""
 
     _iid_ = GUID("{D8EC27BB-3F3B-4042-B10A-4ACFD924D453}")
-    _methods_ = [
+    _methods_ = [  # noqa: RUF012 - comtypes requires mutable class metadata.
         COMMETHOD(
             [],
             HRESULT,
@@ -160,7 +159,7 @@ def _get_view_mode_safe(dispatch: object) -> int | None:
         doc = getattr(dispatch, "Document", None)
         if doc is None:
             return None
-        return int(getattr(doc, "CurrentViewMode"))
+        return int(doc.CurrentViewMode)
     except Exception:
         return None
 
@@ -391,7 +390,7 @@ def get_view_mode_from_document(window_dispatch: object) -> tuple[int | None, st
         doc = getattr(window_dispatch, "Document", None)
         if doc is None:
             return None, "UNKNOWN", "Document was None."
-        mode = int(getattr(doc, "CurrentViewMode"))
+        mode = int(doc.CurrentViewMode)
         name = FOLDERVIEWMODE_NAMES.get(mode, f"UNKNOWN({mode})")
         return mode, name, ""
     except Exception as e:

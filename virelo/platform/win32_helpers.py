@@ -1,4 +1,4 @@
-"""Win32 utility functions: DPI, monitor rect, fullscreen detection, window geometry."""
+"""Win32 utility functions for monitor, fullscreen, and window geometry."""
 
 import ctypes
 from ctypes import wintypes
@@ -7,18 +7,7 @@ import win32api
 import win32con
 import win32gui
 
-from virelo.platform.win32_abi import DWMAPI, SHCORE, USER32
-
-
-def _enable_dpi_awareness() -> None:
-    """Enable per-monitor DPI awareness, with a legacy API fallback."""
-    try:
-        SHCORE.SetProcessDpiAwareness(2)
-    except Exception:
-        try:
-            USER32.SetProcessDPIAware()
-        except Exception:
-            pass
+from virelo.platform.win32_abi import DWMAPI, USER32
 
 
 def get_monitor_rect(hwnd: int, use_work_area: bool = True) -> tuple[int, int, int, int] | None:
