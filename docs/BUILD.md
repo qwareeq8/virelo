@@ -58,11 +58,23 @@ $node = "C:\Path\To\Selected\node.exe"
 [Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
 & $python -c "import os, platform, struct, sys; print('sys.executable:', sys.executable); print('sys.version:', sys.version); print('platform.machine():', platform.machine()); print('pointer_bits:', struct.calcsize('P') * 8); print('CONDA_PREFIX:', os.environ.get('CONDA_PREFIX'))"
 & $node -p "JSON.stringify({execPath: process.execPath, arch: process.arch, platform: process.platform, version: process.version})"
+& $python -I scripts\pe_arch.py --expected x64 $python
 ```
 
-On Windows 11 ARM64, an x64 PowerShell or Python process reports x64 process architecture even
-though the native operating-system architecture is ARM64. That is the expected setup only for
-the x64-emulated target.
+On Windows 11 ARM64, do not use `platform.machine()` or WOW64 status alone to identify the selected
+Python binary. Microsoft documents that [x64 emulation has no WOW64
+layer](https://learn.microsoft.com/en-us/windows/arm/apps-on-arm-x86-emulation), while
+[`IsWow64Process2`](https://learn.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process2)
+returns `IMAGE_FILE_MACHINE_UNKNOWN` for a process that is not under WOW64. An x64-emulated Python
+process can therefore report `platform.machine()` as `ARM64`, or produce an
+`IsWow64Process2` process-machine result of `UNKNOWN` with native machine `ARM64`. Those values
+describe the host or emulation context; they do not prove that `python.exe` is ARM64.
+
+Prove the selected interpreter's architecture from the `python.exe` PE `Machine` field with
+`scripts\pe_arch.py`. The x64 release then requires corroborating ABI evidence: `win_amd64` wheel
+tags and matching PE fields for the Python DLL, extension modules, Qt runtime, PyInstaller
+bootloader, and frozen application. Pointer width only distinguishes 32-bit from 64-bit processes;
+it cannot distinguish x64 from ARM64.
 
 ## Architecture-Qualified Environments
 

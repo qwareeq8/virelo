@@ -234,10 +234,9 @@ def _windows_architecture() -> dict[str, object]:
             raise OSError(ctypes.get_last_error(), "IsWow64Process2 failed.")
 
         native_architecture = MACHINE_ARCHITECTURES.get(native_machine.value, "unknown")
-        process_code = process_machine.value or native_machine.value
         result = {
             "nativeArchitecture": native_architecture,
-            "processArchitecture": MACHINE_ARCHITECTURES.get(process_code, "unknown"),
+            "processArchitecture": MACHINE_ARCHITECTURES.get(process_machine.value, "unknown"),
             "processMachine": f"0x{process_machine.value:04X}",
             "nativeMachine": f"0x{native_machine.value:04X}",
             "source": "IsWow64Process2",
@@ -249,6 +248,52 @@ def _windows_architecture() -> dict[str, object]:
         result["nativeArchitecture"] = _machine_name(native_environment)
         result["source"] = "environment fallback"
     return result
+
+
+def reconcile_process_architecture(
+    executable_architecture: str | None,
+    os_architecture: Mapping[str, object],
+) -> dict[str, object]:
+    """Reconcile the process architecture using the active Python executable's PE header."""
+    resolved_architecture = executable_architecture or "unknown"
+    os_process_architecture = str(os_architecture.get("processArchitecture", "unknown"))
+    native_architecture = str(os_architecture.get("nativeArchitecture", "unknown"))
+
+    accepted_x64_on_arm64_ambiguity = (
+        resolved_architecture == "x64"
+        and os_process_architecture == "unknown"
+        and native_architecture == "arm64"
+        and os_architecture.get("source") == "IsWow64Process2"
+        and str(os_architecture.get("processMachine", "")).upper() == "0X0000"
+        and str(os_architecture.get("nativeMachine", "")).upper() == "0XAA64"
+    )
+    native_process_with_unknown_machine = (
+        resolved_architecture != "unknown"
+        and native_architecture != "unknown"
+        and resolved_architecture == native_architecture
+        and os_process_architecture == "unknown"
+        and os_architecture.get("source") == "IsWow64Process2"
+        and str(os_architecture.get("processMachine", "")).upper() == "0X0000"
+    )
+    evidence_consistent = (
+        (resolved_architecture != "unknown" and resolved_architecture == os_process_architecture)
+        or native_process_with_unknown_machine
+        or accepted_x64_on_arm64_ambiguity
+    )
+    is_emulated = evidence_consistent and (
+        resolved_architecture not in {"unknown", native_architecture}
+        and native_architecture != "unknown"
+    )
+
+    return {
+        "processArchitecture": resolved_architecture,
+        "osReportedProcessArchitecture": os_process_architecture,
+        "processArchitectureSource": "pythonExecutablePe",
+        "architectureEvidenceConsistent": evidence_consistent,
+        "nativeProcessWithUnknownMachine": native_process_with_unknown_machine,
+        "acceptedX64OnArm64Ambiguity": accepted_x64_on_arm64_ambiguity,
+        "isEmulated": is_emulated,
+    }
 
 
 def _is_elevated() -> bool | None:
@@ -438,6 +483,7 @@ def verify_environment(
     os_architecture = _windows_architecture()
     pointer_bits = struct.calcsize("P") * 8
     python_pe: dict[str, object] | None = None
+    python_architecture: str | None = None
 
     if sys.platform != "win32":
         errors.append(f"Windows is required for a Windows release build; found {sys.platform}.")
@@ -448,18 +494,23 @@ def verify_environment(
                 "machine": executable_pe.machine_hex,
                 "architecture": executable_pe.architecture,
             }
-            if executable_pe.architecture != expected:
-                errors.append(
-                    "The active Python executable is "
-                    f"{executable_pe.architecture}; expected {expected}."
-                )
+            python_architecture = executable_pe.architecture
         except ValueError as exc:
             errors.append(str(exc))
 
-    process_architecture = os_architecture["processArchitecture"]
+    process_report = reconcile_process_architecture(python_architecture, os_architecture)
+    process_architecture = process_report["processArchitecture"]
     native_architecture = os_architecture["nativeArchitecture"]
     if sys.platform == "win32" and process_architecture != expected:
-        errors.append(f"The running Python process is {process_architecture}; expected {expected}.")
+        errors.append(
+            f"The active Python executable is {process_architecture}; expected {expected}."
+        )
+    if sys.platform == "win32" and not process_report["architectureEvidenceConsistent"]:
+        errors.append(
+            "The active Python executable PE architecture "
+            f"({process_architecture}) conflicts with the OS-reported process architecture "
+            f"({process_report['osReportedProcessArchitecture']})."
+        )
     if sys.platform == "win32" and expected == "arm64" and native_architecture != "arm64":
         errors.append(f"A native ARM64 build requires ARM64 Windows; found {native_architecture}.")
 
@@ -530,11 +581,7 @@ def verify_environment(
         },
         "windows": {
             **os_architecture,
-            "isEmulated": (
-                process_architecture != native_architecture
-                and process_architecture != "unknown"
-                and native_architecture != "unknown"
-            ),
+            **process_report,
             "isElevated": elevated,
         },
         "conda": conda,

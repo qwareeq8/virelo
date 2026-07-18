@@ -14,8 +14,19 @@ architecture for Virelo's currently supported Windows-on-ARM release.
 $python = "C:\Path\To\Official-x64-Python\python.exe"
 $node = "C:\Path\To\Official-x64-Node\node.exe"
 & $python -c "import platform, struct, sys; print(sys.executable); print(platform.machine()); print(struct.calcsize('P') * 8)"
+& $python -I scripts\pe_arch.py --expected x64 $python
 .\scripts\bootstrap.ps1 -Architecture x64 -PythonExecutable $python -NodeExecutable $node
 ```
+
+On Windows 11 ARM64, `platform.machine()` may report `ARM64` even when `python.exe` is x64.
+Microsoft documents that [x64 emulation does not use
+WOW64](https://learn.microsoft.com/en-us/windows/arm/apps-on-arm-x86-emulation), so
+[`IsWow64Process2`](https://learn.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process2)
+may likewise return process machine `IMAGE_FILE_MACHINE_UNKNOWN` and native machine `ARM64` for
+an x64-emulated process. Treat these as host and emulation diagnostics, not proof of the Python
+binary's architecture. The PE verifier must identify `python.exe` as AMD64 (`0x8664`), and the
+bootstrap preflight must also confirm `win_amd64` wheels and matching Python, Qt, pywin32,
+PyInstaller, and frozen-payload PE files.
 
 Selecting ARM64 Python does not currently make Virelo releasable because the published ARM64
 PySide6 wheels omit Qt WebEngine. Do not set `target_arch="arm64"` in `Virelo.spec`; PyInstaller is

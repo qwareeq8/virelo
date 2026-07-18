@@ -14,6 +14,7 @@ from scripts.verify_python_environment import (
     find_python_dlls,
     parse_wheel_tags,
     python_version_is_supported,
+    reconcile_process_architecture,
     wheel_tags_match_architecture,
 )
 
@@ -22,6 +23,118 @@ def test_python_release_version_boundary() -> None:
     assert not python_version_is_supported((3, 11, 9))
     assert python_version_is_supported((3, 12, 0))
     assert python_version_is_supported((3, 13, 1))
+
+
+def test_x64_python_on_arm64_reconciles_iswow64process2_ambiguity() -> None:
+    """The Python PE header disambiguates x64 emulation that reports as native ARM64."""
+    report = reconcile_process_architecture(
+        "x64",
+        {
+            "nativeArchitecture": "arm64",
+            "processArchitecture": "unknown",
+            "processMachine": "0x0000",
+            "nativeMachine": "0xAA64",
+            "source": "IsWow64Process2",
+        },
+    )
+
+    assert report == {
+        "processArchitecture": "x64",
+        "osReportedProcessArchitecture": "unknown",
+        "processArchitectureSource": "pythonExecutablePe",
+        "architectureEvidenceConsistent": True,
+        "nativeProcessWithUnknownMachine": False,
+        "acceptedX64OnArm64Ambiguity": True,
+        "isEmulated": True,
+    }
+
+
+def test_matching_process_evidence_remains_authoritative() -> None:
+    report = reconcile_process_architecture(
+        "x64",
+        {
+            "nativeArchitecture": "x64",
+            "processArchitecture": "unknown",
+            "processMachine": "0x0000",
+            "nativeMachine": "0x8664",
+            "source": "IsWow64Process2",
+        },
+    )
+
+    assert report["processArchitecture"] == "x64"
+    assert report["osReportedProcessArchitecture"] == "unknown"
+    assert report["architectureEvidenceConsistent"] is True
+    assert report["nativeProcessWithUnknownMachine"] is True
+    assert report["acceptedX64OnArm64Ambiguity"] is False
+    assert report["isEmulated"] is False
+
+
+def test_direct_x64_report_on_arm64_is_recognized_as_emulation() -> None:
+    report = reconcile_process_architecture(
+        "x64",
+        {
+            "nativeArchitecture": "arm64",
+            "processArchitecture": "x64",
+            "processMachine": "0x8664",
+            "nativeMachine": "0xAA64",
+            "source": "IsWow64Process2",
+        },
+    )
+
+    assert report["architectureEvidenceConsistent"] is True
+    assert report["nativeProcessWithUnknownMachine"] is False
+    assert report["acceptedX64OnArm64Ambiguity"] is False
+    assert report["isEmulated"] is True
+
+
+def test_other_process_architecture_mismatches_fail_closed() -> None:
+    mismatched_reports = (
+        reconcile_process_architecture(
+            "x64",
+            {
+                "nativeArchitecture": "arm64",
+                "processArchitecture": "unknown",
+                "processMachine": "0x8664",
+                "nativeMachine": "0xAA64",
+                "source": "IsWow64Process2",
+            },
+        ),
+        reconcile_process_architecture(
+            "x64",
+            {
+                "nativeArchitecture": "arm64",
+                "processArchitecture": "unknown",
+                "processMachine": "0x0000",
+                "nativeMachine": "0xAA64",
+                "source": "environment fallback",
+            },
+        ),
+        reconcile_process_architecture(
+            "arm64",
+            {
+                "nativeArchitecture": "x64",
+                "processArchitecture": "x64",
+                "processMachine": "0x0000",
+                "nativeMachine": "0x8664",
+                "source": "IsWow64Process2",
+            },
+        ),
+        reconcile_process_architecture(
+            None,
+            {
+                "nativeArchitecture": "unknown",
+                "processArchitecture": "unknown",
+                "processMachine": None,
+                "nativeMachine": None,
+                "source": "platform.machine",
+            },
+        ),
+    )
+
+    assert all(report["architectureEvidenceConsistent"] is False for report in mismatched_reports)
+    assert all(report["nativeProcessWithUnknownMachine"] is False for report in mismatched_reports)
+    assert all(report["acceptedX64OnArm64Ambiguity"] is False for report in mismatched_reports)
+    assert all(report["isEmulated"] is False for report in mismatched_reports)
 
 
 def test_isolated_import_child_has_a_hard_timeout(monkeypatch) -> None:

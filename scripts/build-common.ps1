@@ -63,7 +63,22 @@ function Get-VireloPythonProcessArchitecture {
     if ([int] $details.pointer_bits -ne 64) {
         throw "Virelo release builds require a 64-bit Python process; '$PythonExecutable' reports $($details.pointer_bits)-bit."
     }
-    $details | Add-Member -NotePropertyName architecture -NotePropertyValue (ConvertTo-VireloArchitecture $details.machine)
+
+    # Windows x64 emulation on ARM64 does not use WOW64. In that environment,
+    # platform.machine() may report ARM64 even though Python and its extension
+    # ABI are x64, so the executable PE header is the authoritative build input.
+    $peRaw = (& $PythonExecutable -I "$PSScriptRoot\pe_arch.py" $PythonExecutable 2>&1 |
+            Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to inspect the Python executable PE architecture: $peRaw."
+    }
+    $peReport = $peRaw | ConvertFrom-Json
+    $peFiles = @($peReport.files)
+    if ($peFiles.Count -ne 1 -or $peFiles[0].architecture -notin @("x64", "arm64")) {
+        throw "The selected Python executable does not have a supported x64 or ARM64 PE architecture."
+    }
+    $details | Add-Member -NotePropertyName peMachine -NotePropertyValue $peFiles[0].machine_hex
+    $details | Add-Member -NotePropertyName architecture -NotePropertyValue $peFiles[0].architecture
     return $details
 }
 
