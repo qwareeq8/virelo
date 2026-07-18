@@ -81,6 +81,10 @@ $node = "C:\Path\To\Official-x64-Node\node.exe"
 .\scripts\verify-release.ps1 -Architecture x64
 ```
 
+The application and installer build scripts hold one repository-scoped release lock for their
+entire run. A concurrent invocation fails before it can clean or replace another build's generated
+payload.
+
 Expected outputs:
 
 - `dist/x64/Virelo/Virelo.exe`

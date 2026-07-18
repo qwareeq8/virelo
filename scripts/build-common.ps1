@@ -693,6 +693,100 @@ function Remove-VireloWorkspacePath {
     }
 }
 
+function Enter-VireloReleaseBuildLock {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root
+    )
+
+    $rootPath = [IO.Path]::GetFullPath($Root).TrimEnd([char[]] @('\', '/'))
+    $ownerToken = "$PID|$rootPath"
+    $ownerVariable = "VIRELO_RELEASE_BUILD_LOCK_OWNER"
+    $currentOwner = [Environment]::GetEnvironmentVariable(
+        $ownerVariable,
+        [EnvironmentVariableTarget]::Process
+    )
+    if ($currentOwner -eq $ownerToken) {
+        return [pscustomobject]@{
+            OwnsLock      = $false
+            LockPath      = Join-Path $rootPath "build\.release-build.lock"
+            OwnerToken    = $ownerToken
+            PreviousOwner = $currentOwner
+            Stream        = $null
+        }
+    }
+
+    $buildRoot = Join-Path $rootPath "build"
+    New-Item -ItemType Directory -Force -Path $buildRoot | Out-Null
+    $lockPath = Join-Path $buildRoot ".release-build.lock"
+    try {
+        $stream = [IO.File]::Open(
+            $lockPath,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None
+        )
+    }
+    catch [IO.IOException] {
+        $message = "Another Virelo release build already owns $lockPath. " +
+        "Wait for that build to finish before starting another build or installer command."
+        throw $message
+    }
+
+    try {
+        $payload = @(
+            "PID=$PID"
+            "Root=$rootPath"
+            "StartedAtUtc=$([DateTime]::UtcNow.ToString('o'))"
+        ) -join [Environment]::NewLine
+        $bytes = [Text.Encoding]::UTF8.GetBytes($payload + [Environment]::NewLine)
+        $stream.SetLength(0)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+        [Environment]::SetEnvironmentVariable(
+            $ownerVariable,
+            $ownerToken,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+    catch {
+        $stream.Dispose()
+        throw
+    }
+
+    Write-Host "[build-lock] Acquired exclusive release-build ownership: $lockPath."
+    return [pscustomobject]@{
+        OwnsLock      = $true
+        LockPath      = $lockPath
+        OwnerToken    = $ownerToken
+        PreviousOwner = $currentOwner
+        Stream         = $stream
+    }
+}
+
+function Exit-VireloReleaseBuildLock {
+    param(
+        [Parameter(Mandatory)]
+        [psobject] $Token
+    )
+
+    if (-not [bool] $Token.OwnsLock) {
+        return
+    }
+
+    try {
+        $Token.Stream.Dispose()
+    }
+    finally {
+        [Environment]::SetEnvironmentVariable(
+            "VIRELO_RELEASE_BUILD_LOCK_OWNER",
+            $Token.PreviousOwner,
+            [EnvironmentVariableTarget]::Process
+        )
+    }
+    Write-Host "[build-lock] Released exclusive release-build ownership: $($Token.LockPath)."
+}
+
 function Invoke-VireloNativeCommand {
     param(
         [Parameter(Mandatory)]

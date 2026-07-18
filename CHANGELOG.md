@@ -29,5 +29,6 @@ been reconstructed from incomplete tags.
 - Fixed the in-app snap test, post-fullscreen resizability detection, and second-launch handling.
 - Fixed relative timing, capture-thread ownership, settings normalization, and shutdown cleanup.
 - Prevented a lost WebChannel callback from permanently blocking later settings operations.
+- Prevented concurrent release builds from deleting or replacing each other's generated payloads.
 
 [Unreleased]: https://github.com/qwareeq8/Virelo/compare/v1.0...HEAD

@@ -85,6 +85,9 @@ function Get-VireloInnoSetupCompilerDetails {
     }
 }
 
+$root = Get-VireloProjectRoot
+$buildLock = Enter-VireloReleaseBuildLock -Root $root
+try {
 $context = Get-VireloBuildContext `
     -Architecture $Architecture `
     -PythonExecutable $PythonExecutable
@@ -261,3 +264,7 @@ finally {
 }
 
 Write-Host "[build-installer] OK: $installerPath contains the verified $($context.Architecture) payload."
+}
+finally {
+    Exit-VireloReleaseBuildLock -Token $buildLock
+}

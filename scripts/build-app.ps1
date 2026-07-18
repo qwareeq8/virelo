@@ -14,6 +14,8 @@ Set-StrictMode -Version Latest
 . "$PSScriptRoot\build-common.ps1"
 
 $root = Get-VireloProjectRoot
+$buildLock = Enter-VireloReleaseBuildLock -Root $root
+try {
 $targetArchitecture = if ($Architecture -eq "auto") {
     Resolve-VireloArchitecture `
         -Architecture $Architecture `
@@ -260,3 +262,7 @@ finally {
 }
 
 Write-Host "[build-app] OK: $($context.BundlePath) is verified as $($context.Architecture)."
+}
+finally {
+    Exit-VireloReleaseBuildLock -Token $buildLock
+}
