@@ -174,7 +174,9 @@ executable. This removes the shortcut for the account running Uninstall, includi
 same-account UAC elevation. Inno Setup does not support `runasoriginaluser` at uninstall time, so
 over-the-shoulder elevation with another administrator cannot clean the original user's startup
 link automatically. It never enumerates or deletes settings, logs, backups, or startup links from
-other profiles.
+other profiles. After a successful folder-view backup, the running application retains the newest
+10 matching recovery directories under `%LOCALAPPDATA%\Virelo`; uninstall preserves those retained
+backups.
 
 ## Frontend Build Failures
 
@@ -239,6 +241,15 @@ This is expected. Virelo elevates for global keyboard hooks and cross-process wi
 Approve the prompt with the same Windows account that owns the desktop. If a standard user enters
 credentials for a different administrator account, Virelo refuses to change Explorer folder views
 because `HKCU` would refer to the administrator profile rather than the visible user's profile.
+
+### The Sticky Keys prompt appears while testing the default shortcut
+
+Virelo defaults to three Shift taps. Windows uses five Shift presses for its
+[Sticky Keys accessibility shortcut](https://support.microsoft.com/en-us/accessibility/windows/windows-keyboard-shortcuts-for-accessibility),
+so repeatedly testing the Virelo gesture can also open the Windows prompt. Rebind Virelo to a
+different key, or turn off only the Sticky Keys keyboard shortcut under **Settings > Accessibility >
+Keyboard > Sticky keys** if you do not use it. Do not disable Sticky Keys itself for a user who
+relies on the accessibility feature.
 
 ### Window dragging does not work
 

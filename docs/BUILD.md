@@ -162,6 +162,23 @@ Windows ARM64 PySide6 wheels omit `QtWebEngineCore`, `QtWebEngineWidgets`,
 can be reconsidered only after an upstream wheel passes the isolated imports, Qt deployment audit,
 recursive PE scan, and frozen WebEngine smoke test. An x64 payload must never be renamed as ARM64.
 
+`requirements/arm64-webengine-contract.json` is the reviewed trust anchor for the official
+PySide6-Addons ARM64 wheel. It records the exact version, filename, wheel tag, SHA-256, expected
+capability result, and the neighboring-file fingerprint that distinguishes the known upstream
+omission from a damaged installation. Run the cross-platform consistency check after changing any
+PySide6 cohort pin:
+
+```powershell
+python -I scripts\verify_arm64_webengine_contract.py
+```
+
+The separate `ARM64 upstream watch` workflow checks official PyPI each Monday and can also be run
+manually. It reads metadata for all four PySide6 cohort packages. When the Addons head changes, it
+downloads only that candidate wheel, verifies its published digest, and inventories ZIP
+filenames without installing, importing, or extracting the wheel. The workflow uploads
+`pypi-head.json` and intentionally fails so a person must review the candidate. It never changes
+pins and never enables the packaging matrix.
+
 The x64 pipeline runs a clean, lockfile-driven `npm ci`, builds the frontend, performs the Python
 and Qt preflight, runs PyInstaller's official PySide6 hooks, validates the bundle, compiles the
 matching installer, and runs release verification. It treats a failed `QtLibraryInfo(PySide6)`

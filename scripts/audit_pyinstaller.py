@@ -842,11 +842,13 @@ def audit_pyinstaller(
     benign_warning_records = [
         record for record in warning_records if record["classification"] == "benign"
     ]
-    for record in fatal_warning_records:
-        errors.append(
+    errors.extend(
+        (
             f"Fatal PyInstaller warning at {record['source']}:{record['line']} "
             f"[{record['category']}]: {record['subject']}. {record['reason']}"
         )
+        for record in fatal_warning_records
+    )
     warnings.extend(
         f"{record['source']}:{record['line']} [{record['category']}]: {record['reason']}"
         for record in benign_warning_records

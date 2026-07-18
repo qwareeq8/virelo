@@ -1,0 +1,37 @@
+name: ARM64 upstream watch
+
+on:
+  schedule:
+    - cron: "23 11 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-upstream-watch
+  cancel-in-progress: true
+
+jobs:
+  inspect-pyside6-head:
+    name: Inspect official PySide6 ARM64 wheel head
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.13"
+      - name: Inspect official PyPI metadata and candidate wheel inventory
+        run: |
+          python -I scripts/verify_arm64_webengine_contract.py \
+            --report build/arm64-upstream-watch/contract-verification.json
+          python -I scripts/watch_pyside6_arm64.py \
+            --report build/arm64-upstream-watch/pypi-head.json
+      - name: Upload the upstream candidate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: virelo-arm64-upstream-watch
+          if-no-files-found: error
+          path: build/arm64-upstream-watch/*.json

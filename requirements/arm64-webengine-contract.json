@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "distribution": "PySide6-Addons",
+  "reviewedVersion": "6.11.1",
+  "wheelFilename": "pyside6_addons-6.11.1-cp310-abi3-win_arm64.whl",
+  "wheelTag": "cp310-abi3-win_arm64",
+  "sha256": "3494f480dee92f415be2f2d989c0b3f4755ac332b28045cbf4ba0f5c5a22ba37",
+  "expectedStatus": "unavailable",
+  "expectedReasonCode": "reviewed-pyside6-arm64-webengine-record-omission",
+  "omissionFingerprint": [
+    "PySide6/QtWebChannel.pyd",
+    "PySide6/Qt6WebChannel.dll",
+    "PySide6/QtPdf.pyd",
+    "PySide6/translations/qtwebengine_en.qm"
+  ]
+}

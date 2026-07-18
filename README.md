@@ -91,6 +91,25 @@ In a separate terminal, use the selected development environment:
 The frontend hot-reloads from `localhost:5173`. Changes to React components appear immediately
 without restarting the Python backend.
 
+## Development Checks
+
+Run the Python checks from the repository root:
+
+```powershell
+.venv-x64\Scripts\python.exe -m ruff format .
+.venv-x64\Scripts\python.exe -m ruff check .
+.venv-x64\Scripts\python.exe -m pytest -q
+```
+
+Run the frontend checks from `frontend/`:
+
+```powershell
+npm run format
+npm run lint
+npm test
+npm run build
+```
+
 ## Architecture
 
 Virelo uses a Python/PySide6 backend that hosts a React frontend inside a QWebEngineView. The two
@@ -108,6 +127,7 @@ In release mode, the frontend is built as static files under `frontend/dist/` an
 
 ## Documentation
 
+- [Changelog](CHANGELOG.md): User-visible changes in the current development version.
 - [Building from Source](docs/BUILD.md): Full build pipeline, development mode, and version
   management.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): Common build and runtime issues with fixes.

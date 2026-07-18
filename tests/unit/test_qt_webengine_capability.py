@@ -5,6 +5,7 @@ from __future__ import annotations
 import struct
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -16,6 +17,7 @@ from scripts.probe_qt_webengine_capability import (
     exit_code_for_status,
     probe_capability,
 )
+from scripts.verify_arm64_webengine_contract import load_review_contract
 
 _ARM64_TAG = "cp310-abi3-win_arm64"
 _FINGERPRINT = (
@@ -131,6 +133,28 @@ def test_partial_or_unfingerprinted_record_omission_is_indeterminate(tmp_path: P
     assert report["status"] == "indeterminate"
     assert "unreviewed Qt WebEngine omission" in str(report["errors"])
     assert exit_code_for_status(str(report["status"])) == EXIT_INDETERMINATE
+
+
+def test_missing_payload_is_not_accepted_after_contract_marks_it_available(
+    tmp_path: Path,
+) -> None:
+    """A stale omission fingerprint cannot override an available-wheel contract."""
+    addons_files = set(_FINGERPRINT)
+    _materialize(tmp_path, addons_files)
+    contract = replace(
+        load_review_contract(),
+        expected_status="available",
+        expected_reason_code="qt-webengine-capable",
+    )
+
+    report = probe_capability(
+        architecture="arm64",
+        distribution_getter=_distribution_getter(tmp_path, addons_files=addons_files),
+        review_contract=contract,
+    )
+
+    assert report["status"] == "indeterminate"
+    assert "unreviewed Qt WebEngine omission" in str(report["errors"])
 
 
 def test_recorded_but_missing_payload_is_indeterminate(tmp_path: Path) -> None:

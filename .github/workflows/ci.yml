@@ -48,7 +48,12 @@ jobs:
           python -m pip install --constraint requirements/build-constraints.txt --editable ".[dev]"
           python -m pip check
       - name: Run non-Qt Python tests
-        run: python -m pytest -m "not requires_qt" -q
+        run: |
+          python -I scripts/verify_arm64_webengine_contract.py
+          python -m pytest -m "not requires_qt" -q \
+            --cov=virelo \
+            --cov-branch \
+            --cov-report=term-missing
 
   frontend:
     runs-on: ubuntu-latest
@@ -67,9 +72,11 @@ jobs:
         run: |
           npm audit --audit-level=low
           npm audit --omit=dev --audit-level=low
-      - name: Test and build the frontend
+      - name: Check, test, and build the frontend
         working-directory: frontend
         run: |
+          npm run format:check
+          npm run lint
           npm test
           npm run build
 
@@ -143,6 +150,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "The capability probe is not running under verified official native ARM64 Python."
           }
+          & $basePython -I scripts\verify_arm64_webengine_contract.py `
+            --report "$reportDirectory\contract-verification.json"
+          if ($LASTEXITCODE -ne 0) {
+            throw "The reviewed ARM64 WebEngine contract and dependency pins are inconsistent."
+          }
+          $reviewContract = Get-Content -LiteralPath `
+            "requirements\arm64-webengine-contract.json" -Raw | ConvertFrom-Json
 
           $venvPath = Join-Path $env:RUNNER_TEMP "virelo-arm64-capability"
           & $basePython -I -m venv $venvPath
@@ -168,12 +182,19 @@ jobs:
           if ($addonsInstall.Count -ne 1) {
             throw "The pip report does not identify exactly one PySide6-Addons wheel."
           }
-          # Change this digest only after reviewing the replacement ARM64 wheel
-          # inventory and updating the probe's reviewed capability contract.
-          $expectedAddonsSha256 = "3494f480dee92f415be2f2d989c0b3f4755ac332b28045cbf4ba0f5c5a22ba37"
           $actualAddonsSha256 = $addonsInstall[0].download_info.archive_info.hashes.sha256
-          if ($actualAddonsSha256 -ne $expectedAddonsSha256) {
-            throw "The reviewed ARM64 PySide6-Addons wheel hash is $actualAddonsSha256; expected $expectedAddonsSha256."
+          if ($actualAddonsSha256 -ne $reviewContract.sha256) {
+            throw "The reviewed ARM64 PySide6-Addons wheel hash is $actualAddonsSha256; expected $($reviewContract.sha256)."
+          }
+          if ($addonsInstall[0].metadata.version -ne $reviewContract.reviewedVersion) {
+            throw "The installed PySide6-Addons version does not match the reviewed ARM64 contract."
+          }
+          $addonsUri = [Uri]$addonsInstall[0].download_info.url
+          $actualAddonsFilename = [Uri]::UnescapeDataString(
+            [System.IO.Path]::GetFileName($addonsUri.AbsolutePath)
+          )
+          if ($actualAddonsFilename -ne $reviewContract.wheelFilename) {
+            throw "The installed PySide6-Addons wheel is $actualAddonsFilename; expected $($reviewContract.wheelFilename)."
           }
 
           $capabilityReport = Join-Path $reportDirectory "qtwebengine.json"
@@ -198,6 +219,18 @@ jobs:
           $capability = Get-Content -LiteralPath $capabilityReport -Raw | ConvertFrom-Json
           if ($capability.schemaVersion -ne 1 -or $capability.requestedArchitecture -ne "arm64") {
             throw "The ARM64 Qt WebEngine capability report has an unexpected schema or target."
+          }
+          if (
+            $capability.reviewedContract.reviewedVersion -ne $reviewContract.reviewedVersion -or
+            $capability.reviewedContract.sha256 -ne $reviewContract.sha256
+          ) {
+            throw "The capability probe did not use the reviewed ARM64 wheel contract."
+          }
+          if (
+            $capability.status -ne $reviewContract.expectedStatus -or
+            $capability.reasonCode -ne $reviewContract.expectedReasonCode
+          ) {
+            throw "The ARM64 capability result contradicts the reviewed wheel contract."
           }
 
           $include = @(

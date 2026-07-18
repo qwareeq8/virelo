@@ -48,7 +48,10 @@ below.
    Get-Content frontend\package.json | ConvertFrom-Json | Select-Object -ExpandProperty version
    ```
 
-5. Retain the exact dependency inventory written by bootstrap. The constraints control third-party
+5. Update `CHANGELOG.md` with only verified user-visible changes. Keep new work under
+   `[Unreleased]` until the release version and date are finalized.
+
+6. Retain the exact dependency inventory written by bootstrap. The constraints control third-party
    Python package selection, but the selected CPython patch release and its bundled pip are also
    part of the recorded build environment; the process is auditable, not bit-for-bit hermetic.
 
@@ -57,7 +60,7 @@ below.
    Get-Content build\x64\pip-freeze.txt
    ```
 
-6. Run the full frontend audit and the production-only audit. Classify any finding before release:
+7. Run the full frontend audit and the production-only audit. Classify any finding before release:
 
    ```powershell
    Push-Location frontend
@@ -97,6 +100,28 @@ first missing import or runtime component. Native release work can resume only a
 imports, PyInstaller hook, Qt deployment audit, recursive PE scan, source smoke test, frozen smoke
 test, installer gate, and physical Surface checklist all pass. Never rename an x64 artifact as
 ARM64.
+
+The reviewed upstream boundary is stored in
+`requirements/arm64-webengine-contract.json`. The `ARM64 upstream watch` workflow is advisory: a
+failed scheduled or manual run means that official PyPI head differs from the reviewed contract, not
+that native packaging is safe. Download its `virelo-arm64-upstream-watch` report and inspect the
+candidate filename, version, published and computed SHA-256 values, and required and WebEngine ZIP
+entries.
+
+To unfreeze native ARM64 after a candidate includes the required payload:
+
+1. Review the candidate report and the official PyPI release files. Do not install or execute the
+   candidate as part of this metadata review.
+2. Update the four exact cohort pins in `requirements/build-constraints.txt` together:
+   `PySide6`, `PySide6-Addons`, `PySide6-Essentials`, and `shiboken6`.
+3. Update the reviewed version, exact ARM64 wheel filename and tag, SHA-256, expected status, and
+   reason code in `requirements/arm64-webengine-contract.json`.
+4. Run `python -I scripts/verify_arm64_webengine_contract.py`, then push the change so the native
+   Windows runner installs that exact wheel and runs the capability probe. Do not bypass a
+   contradiction between the installed payload and the contract.
+5. Resume release work only if the ARM64 PyInstaller build, Qt deployment audit, recursive PE scan,
+   source and frozen WebEngine smoke tests, installer gate, fresh-install check, and physical
+   Windows 11 ARM64 checklist all pass.
 
 ## Required Automated Evidence
 

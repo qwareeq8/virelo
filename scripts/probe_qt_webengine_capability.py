@@ -13,6 +13,11 @@ from typing import Any, cast
 
 if __package__:
     from .pe_arch import normalize_architecture, verify_pe_paths
+    from .verify_arm64_webengine_contract import (
+        Arm64WebEngineContract,
+        ContractError,
+        load_review_contract,
+    )
     from .verify_python_environment import (
         _run_json_child,
         parse_wheel_tags,
@@ -21,6 +26,11 @@ if __package__:
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from pe_arch import normalize_architecture, verify_pe_paths
+    from verify_arm64_webengine_contract import (  # type: ignore[no-redef]
+        Arm64WebEngineContract,
+        ContractError,
+        load_review_contract,
+    )
     from verify_python_environment import (  # type: ignore[no-redef]
         _run_json_child,
         parse_wheel_tags,
@@ -38,8 +48,6 @@ _PYSIDE_DISTRIBUTIONS = (
     "PySide6_Addons",
     "shiboken6",
 )
-_REVIEWED_ADDONS_VERSION = "6.11.1"
-_REVIEWED_ADDONS_TAGS = ("cp310-abi3-win_arm64",)
 
 # These files are the minimum WebEngine payload used by Virelo's source import,
 # PyInstaller collection, frozen deployment verification, and smoke test.
@@ -54,17 +62,6 @@ REQUIRED_RECORD_ENTRIES = (
     "PySide6/resources/qtwebengine_resources_100p.pak",
     "PySide6/resources/qtwebengine_resources_200p.pak",
     "PySide6/translations/qtwebengine_locales/en-US.pak",
-)
-
-# The reviewed 6.11.1 ARM64 Addons wheel contains these neighboring modules and
-# a WebEngine translation even though its RECORD omits the runtime above. This
-# fingerprint prevents an empty or corrupt RECORD from being treated as an
-# accepted upstream limitation.
-_REVIEWED_ADDONS_FINGERPRINT = (
-    "PySide6/QtWebChannel.pyd",
-    "PySide6/Qt6WebChannel.dll",
-    "PySide6/QtPdf.pyd",
-    "PySide6/translations/qtwebengine_en.qm",
 )
 
 _PE_RECORD_ENTRIES = (
@@ -140,6 +137,7 @@ def _base_report(architecture: str) -> dict[str, object]:
         "requiredRecordEntries": [],
         "isolatedImport": None,
         "peArchitecture": None,
+        "reviewedContract": None,
         "errors": [],
     }
 
@@ -167,17 +165,19 @@ def _is_reviewed_arm64_omission(
     tags: Sequence[str],
     record: set[str],
     distribution: Any,
+    contract: Arm64WebEngineContract,
 ) -> bool:
-    """Return whether RECORD exactly matches the reviewed 6.11.1 ARM64 omission."""
+    """Return whether RECORD exactly matches the reviewed ARM64 wheel omission."""
     fingerprint_paths = [
-        Path(distribution.locate_file(entry)) for entry in _REVIEWED_ADDONS_FINGERPRINT
+        Path(distribution.locate_file(entry)) for entry in contract.omission_fingerprint
     ]
     return (
         architecture == "arm64"
-        and version == _REVIEWED_ADDONS_VERSION
-        and tuple(tags) == _REVIEWED_ADDONS_TAGS
+        and contract.expected_status == "unavailable"
+        and version == contract.reviewed_version
+        and tuple(tags) == (contract.wheel_tag,)
         and all(entry not in record for entry in REQUIRED_RECORD_ENTRIES)
-        and all(entry in record for entry in _REVIEWED_ADDONS_FINGERPRINT)
+        and all(entry in record for entry in contract.omission_fingerprint)
         and all(path.is_file() for path in fingerprint_paths)
     )
 
@@ -187,6 +187,7 @@ def probe_capability(
     architecture: str,
     distribution_getter: DistributionGetter = importlib.metadata.distribution,
     import_runner: ImportRunner = _run_import_child,
+    review_contract: Arm64WebEngineContract | None = None,
 ) -> dict[str, object]:
     """Return evidence for native Qt WebEngine availability in this environment."""
     expected = normalize_architecture(architecture)
@@ -194,6 +195,22 @@ def probe_capability(
     errors = cast(list[str], report["errors"])
     distributions = cast(list[dict[str, object]], report["distributions"])
     installed: dict[str, tuple[Any, dict[str, object], set[str]]] = {}
+
+    if expected == "arm64":
+        try:
+            review_contract = review_contract or load_review_contract()
+        except ContractError as error:
+            errors.append(str(error))
+            return report
+        report["reviewedContract"] = {
+            "distribution": review_contract.distribution,
+            "reviewedVersion": review_contract.reviewed_version,
+            "wheelFilename": review_contract.wheel_filename,
+            "wheelTag": review_contract.wheel_tag,
+            "sha256": review_contract.sha256,
+            "expectedStatus": review_contract.expected_status,
+            "expectedReasonCode": review_contract.expected_reason_code,
+        }
 
     for name in _PYSIDE_DISTRIBUTIONS:
         try:
@@ -223,8 +240,23 @@ def probe_capability(
     if len(versions) != 1:
         errors.append("The installed PySide6 and Shiboken distributions do not share one version.")
         return report
+    installed_version = next(iter(versions))
+    if review_contract is not None and installed_version != review_contract.reviewed_version:
+        errors.append(
+            f"The installed PySide6 cohort is {installed_version}; the reviewed ARM64 wheel "
+            f"contract is {review_contract.reviewed_version}."
+        )
+        return report
 
     addons, addons_evidence, addons_record = installed["PySide6_Addons"]
+    if review_contract is not None and tuple(cast(list[str], addons_evidence["tags"])) != (
+        review_contract.wheel_tag,
+    ):
+        errors.append(
+            "The installed PySide6-Addons wheel tags do not match the reviewed ARM64 wheel "
+            f"contract: {addons_evidence['tags']}."
+        )
+        return report
     entry_evidence = _entry_evidence(addons, addons_record)
     report["requiredRecordEntries"] = entry_evidence
     missing_record = [
@@ -232,12 +264,13 @@ def probe_capability(
     ]
 
     if missing_record:
-        if _is_reviewed_arm64_omission(
+        if review_contract is not None and _is_reviewed_arm64_omission(
             architecture=expected,
             version=str(addons_evidence["version"]),
             tags=cast(list[str], addons_evidence["tags"]),
             record=addons_record,
             distribution=addons,
+            contract=review_contract,
         ):
             report["status"] = "unavailable"
             report["reasonCode"] = "reviewed-pyside6-arm64-webengine-record-omission"

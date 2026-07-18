@@ -1,1 +1,3 @@
-from virelo.app.config import APP_VERSION as __version__  # noqa: F401
+from virelo.app.config import APP_VERSION as __version__
+
+__all__ = ["__version__"]

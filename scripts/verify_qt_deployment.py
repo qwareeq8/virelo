@@ -106,10 +106,11 @@ def _compare_source_files(
             f"The bundle has unexpected {relative_directory} files: {', '.join(unexpected)}."
         )
 
-    mismatched: list[str] = []
-    for relative_path in sorted(set(source_files) & set(bundle_files)):
-        if _sha256(source_files[relative_path]) != _sha256(bundle_files[relative_path]):
-            mismatched.append(relative_path)
+    mismatched = [
+        relative_path
+        for relative_path in sorted(set(source_files) & set(bundle_files))
+        if _sha256(source_files[relative_path]) != _sha256(bundle_files[relative_path])
+    ]
     if mismatched:
         errors.append(
             f"The bundle has modified {relative_directory} files: {', '.join(mismatched)}."
