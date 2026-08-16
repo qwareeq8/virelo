@@ -90,6 +90,9 @@ class TabAutosizeState:
     pending_retry: bool = False
     retry_attempt: int = 0
     next_retry_at: float = 0.0
+    # Pending work parked on a hidden or minimized window. Parked tabs are
+    # rechecked on the normal idle cadence instead of holding the fast poll.
+    waiting_for_interactive: bool = False
 
     # Circuit-breaker state.
     consecutive_failures: int = 0
@@ -211,6 +214,7 @@ class ExplorerAutosizeEngine:
         state.retry_attempt = 0
         state.next_retry_at = now + DEBOUNCE_DELAY_MS / 1000.0
         state.consecutive_failures = 0
+        state.waiting_for_interactive = False
 
     def _clean_dedupe_cache(self, now: float) -> None:
         """Remove expired entries from deduplication cache."""
@@ -426,11 +430,17 @@ class ExplorerAutosizeEngine:
                 state.pending_retry = False
                 continue
 
-            # Check if window is interactive
+            # A hidden or minimized window cannot be autosized yet. Park the
+            # work: it stays pending, but must not hold the poll loop at the
+            # fast cadence indefinitely (a background Explorer window would
+            # otherwise pin one COM enumeration every 0.5 seconds for as long
+            # as it stays minimized).
             if not self._is_window_interactive(hwnd):
                 log.debug("Explorer autosizing skipped noninteractive hwnd=%s.", hwnd)
                 state.next_retry_at = now + 0.5
+                state.waiting_for_interactive = True
                 continue
+            state.waiting_for_interactive = False
 
             # Attempt autosize
             log.debug(
@@ -552,12 +562,15 @@ class ExplorerAutosizeEngine:
 
     def _next_delay(self, now: float) -> float:
         """Calculate the delay until the next step should run."""
-        # Check if any tabs have pending work
-        pending_tabs = [s for s in self.tab_state.values() if s.pending_retry]
+        # Work parked on a noninteractive window is rechecked on the idle
+        # cadence below; only actionable work keeps the fast poll.
+        pending_tabs = [
+            s for s in self.tab_state.values() if s.pending_retry and not s.waiting_for_interactive
+        ]
 
         if not pending_tabs:
-            # No pending work: decay the poll rate with inactivity. The cost
-            # of a poll is a full cross-process COM enumeration, so idle
+            # No actionable work: decay the poll rate with inactivity. The
+            # cost of a poll is a full cross-process COM enumeration, so idle
             # cadence matters more than first-detection latency.
             idle = now - self._last_activity
             if idle < 5.0:

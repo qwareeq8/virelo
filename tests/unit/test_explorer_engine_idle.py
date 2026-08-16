@@ -229,4 +229,32 @@ def test_noninteractive_tab_is_rescheduled_instead_of_spinning():
     )
     engine.step(100.0)
 
-    assert engine.step(100.2) == 0.5
+    assert engine.step(100.2) >= 0.1
+
+
+def test_hidden_windows_do_not_pin_the_fast_poll_forever():
+    """Work parked on a minimized window must decay to the idle cadence.
+
+    A background Explorer window used to hold ``pending_retry`` with a fresh
+    0.5-second recheck on every pass, so the worker enumerated COM windows
+    twice per second for as long as the window stayed minimized.
+    """
+    interactive = [False]
+    attempts = []
+    engine = ExplorerAutosizeEngine(
+        lambda: [(42, 3, r"C:\folder", 4)],
+        lambda hwnd, tab_id, path: attempts.append(path) or (True, "com", False),
+        lambda hwnd, tab_id, path: (True, "com", False),
+        lambda hwnd: interactive[0],
+    )
+
+    engine.step(100.0)
+    engine.step(100.3)
+    assert engine.step(140.0) == 1.0
+    assert attempts == []
+
+    # Restoring the window resumes the parked autosize on the next poll.
+    interactive[0] = True
+    engine.step(141.0)
+    assert attempts == [r"c:\folder"]
+    assert engine.step(141.2) == 1.0
