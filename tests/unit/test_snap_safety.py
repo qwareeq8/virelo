@@ -369,6 +369,22 @@ def test_manual_move_between_snaps_refreshes_restore_geometry(monkeypatch) -> No
     assert controller._orig_sizes[42]["snapped_rect"] == (510, 170, 900, 700)
 
 
+def test_restore_centers_the_original_size_on_the_current_monitor(monkeypatch) -> None:
+    """Restore keeps the captured size but always centers the window."""
+
+    user32 = _FakeUser32()
+    _patch_snap_runtime(monkeypatch, user32, process_name="ordinary.exe")
+    controller = SnapRestoreController(_settings())
+
+    assert controller._snap(42)
+    assert controller._restore(42)
+
+    # The captured 800x600 size returns centered on the 1920x1040 work area,
+    # not at its original (100, 100) position.
+    assert user32.moves[-1] == ((1920 - 800) // 2, (1040 - 600) // 2, 800, 600)
+    assert 42 not in controller._orig_sizes
+
+
 def test_failed_monitor_lookup_does_not_arm_restore(monkeypatch) -> None:
     """A snap rejected before any window change leaves no restore record."""
 

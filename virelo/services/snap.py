@@ -323,9 +323,9 @@ class SnapRestoreController(QtCore.QObject):
         super().__init__()
         self.settings = settings
         # Original geometry is captured at snap time (in _snap), not at
-        # startup. Pre-populating here would make restore return a window to
-        # wherever it happened to be when Virelo launched, not to where it was
-        # right before the user snapped it.
+        # startup. Restore centers the window at its captured size, so the
+        # captured size must be the one the window had right before the user
+        # snapped it, not whatever it was when Virelo launched.
         self._orig_sizes: dict[int, dict[str, object]] = {}
 
     def _prune_closed_windows(self):
@@ -689,11 +689,24 @@ class SnapRestoreController(QtCore.QObject):
         if was_maximized:
             win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
         else:
-            left, top, width, height = rect
-            # Return the window to its captured position, clamped so it stays
-            # reachable on the current monitor (it may have changed since).
-            x = max(left_edge, min(left, right_edge - width))
-            y = max(top_edge, min(top, bottom_edge - height))
+            _, _, width, height = rect
+            # Restore the captured size but always center the window on its
+            # current monitor, matching snap's DWM-aware centering.
+            current = wintypes.RECT()
+            USER32.GetWindowRect(hwnd, ctypes.byref(current))
+            border_deltas = window_border_deltas(
+                (current.left, current.top, current.right, current.bottom),
+                _get_window_dwm_rect(hwnd),
+            )
+            x, y = calculate_center_position(
+                left_edge,
+                top_edge,
+                int(right_edge - left_edge),
+                int(bottom_edge - top_edge),
+                int(width),
+                int(height),
+                border_deltas,
+            )
             if not USER32.MoveWindow(hwnd, int(x), int(y), int(width), int(height), True):
                 return False
         # Restore succeeded: forget the saved geometry so a re-snap captures

@@ -403,7 +403,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self,
             "Virelo Help",
             "* Press Count & Interval: how many times and how fast to press the Snap Key.\n"
-            "* Hold the Restore Key while pressing to restore original window size.\n"
+            "* Hold the Restore Key while pressing to restore the original window size, centered.\n"
             "* Width/Height: snapped window size as % of the current monitor.\n"
             "* Explorer Auto-Size: auto-fit columns on folder change (Details view).\n"
             "* Game Mode: when enabled, fullscreen windows (typically games) are skipped.\n\n"

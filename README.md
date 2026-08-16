@@ -10,7 +10,7 @@ Virelo provides two core features:
 1. **Window Snap:** A multi-press keyboard shortcut snaps the foreground window to a configurable
    size and position, centered on the current monitor. Windows that cannot resize cleanly are
    centered at their current size. Press the shortcut again to restore the window to its original
-   dimensions.
+   dimensions, centered on the current monitor.
 
 2. **Explorer Column Autosize:** Automatically sizes File Explorer Details-view columns when
    navigating between folders, eliminating the need to adjust column widths manually.
