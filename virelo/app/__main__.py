@@ -111,6 +111,21 @@ def _instance_already_running() -> bool:
     return bool(get_last_error is not None and get_last_error() == 5)
 
 
+def _remove_startup_task() -> int:
+    """Remove Virelo's elevated logon task for installer-driven uninstall.
+
+    The uninstaller runs this entry elevated because deleting a
+    highest-run-level task requires administrator rights.
+    """
+    try:
+        from virelo.platform.startup import remove_startup_task
+
+        remove_startup_task()
+        return 0
+    except Exception:
+        return 1
+
+
 def _remove_current_user_startup_shortcut() -> int:
     """Remove Virelo's per-user startup link for installer-driven uninstall."""
     appdata = os.environ.get("APPDATA")
@@ -566,7 +581,12 @@ def main() -> None:
     parser.add_argument(
         "--remove-startup-shortcut",
         action="store_true",
-        help="Remove Virelo's startup shortcut for the current user and exit.",
+        help="Remove Virelo's legacy startup shortcut for the current user and exit.",
+    )
+    parser.add_argument(
+        "--remove-startup-task",
+        action="store_true",
+        help="Remove Virelo's elevated logon task and exit.",
     )
     args, _ = parser.parse_known_args()
 
@@ -574,6 +594,8 @@ def main() -> None:
         sys.exit(_run_smoke_test(args.smoke_report))
     if args.remove_startup_shortcut:
         sys.exit(_remove_current_user_startup_shortcut())
+    if args.remove_startup_task:
+        sys.exit(_remove_startup_task())
 
     import faulthandler
 

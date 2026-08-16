@@ -827,7 +827,10 @@ function GeneralPage({ app }) {
       </Card>
 
       <Card title="Startup">
-        <Row label="Launch at login" description="Start Virelo when you sign in to Windows.">
+        <Row
+          label="Launch at login"
+          description="Start Virelo when you sign in to Windows, without a UAC prompt."
+        >
           <Toggle on={app.launchLogin} onChange={(v) => app.set({ launchLogin: v })} />
         </Row>
         <Row

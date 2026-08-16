@@ -178,9 +178,10 @@ Run the verified x64 installer on a current Windows 11 ARM64 Surface through x64
 - Apply and reset the default folder view only after file copies, moves, and deletions finish. If
   testing over-the-shoulder UAC with another administrator's credentials, confirm Virelo refuses
   the per-user registry change instead of writing the administrator profile.
-- Enable **Run at startup**, sign out and back in, and confirm the per-user startup shortcut starts
-  Virelo. Leave it enabled for the uninstall trial and confirm a normal same-account UAC uninstall
-  removes that account's startup shortcut before deleting the application.
+- Enable **Run at startup**, sign out and back in, and confirm the elevated logon task starts
+  Virelo without a UAC prompt. Leave it enabled for the uninstall trial and confirm a normal
+  same-account UAC uninstall removes the logon task and any legacy per-user startup shortcut
+  before deleting the application.
 - Uninstall silently and interactively in separate trials. Confirm application files, Start menu
   shortcuts, and the optional common desktop shortcut are removed. Confirm per-user settings and
   Explorer recovery backups remain available as intended. Also test over-the-shoulder elevation,

@@ -90,6 +90,152 @@ def test_ensure_dispatch_recovers_from_corrupt_generated_cache(monkeypatch, tmp_
     ensure.assert_called_once_with("WScript.Shell")
 
 
+class _FakeTaskFolder:
+    def __init__(self):
+        self.registrations = []
+        self.deleted = []
+        self.delete_error = None
+
+    def RegisterTaskDefinition(self, *args):
+        self.registrations.append(args)
+
+    def DeleteTask(self, name, flags):
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append((name, flags))
+
+
+class _FakeTaskService:
+    """Late-bound Schedule.Service stand-in that records the task definition."""
+
+    def __init__(self, folder):
+        self._folder = folder
+        self.triggers = []
+        self.actions = []
+        self.definition = SimpleNamespace(
+            RegistrationInfo=SimpleNamespace(Description=None),
+            Principal=SimpleNamespace(RunLevel=None, LogonType=None),
+            Settings=SimpleNamespace(
+                DisallowStartIfOnBatteries=None,
+                StopIfGoingOnBatteries=None,
+                ExecutionTimeLimit=None,
+            ),
+            Triggers=SimpleNamespace(Create=self._create_trigger),
+            Actions=SimpleNamespace(Create=self._create_action),
+        )
+
+    def _create_trigger(self, kind):
+        trigger = SimpleNamespace(kind=kind, UserId=None)
+        self.triggers.append(trigger)
+        return trigger
+
+    def _create_action(self, kind):
+        action = SimpleNamespace(kind=kind, Path=None, Arguments=None, WorkingDirectory=None)
+        self.actions.append(action)
+        return action
+
+    def Connect(self):
+        pass
+
+    def GetFolder(self, path):
+        assert path == "\\"
+        return self._folder
+
+    def NewTask(self, _flags):
+        return self.definition
+
+
+def test_register_startup_task_builds_an_elevated_logon_task(monkeypatch) -> None:
+    """Autostart registers a highest-run-level logon task for the current user."""
+    from virelo.platform import startup
+
+    folder = _FakeTaskFolder()
+    service = _FakeTaskService(folder)
+    monkeypatch.setattr(startup, "_current_user_account", lambda: "DOMAIN\\user")
+
+    startup.register_startup_task(
+        r"C:\Apps\Virelo\Virelo.exe",
+        "",
+        r"C:\Apps\Virelo",
+        dispatch=lambda name: service,
+    )
+
+    definition = service.definition
+    assert definition.Principal.RunLevel == 1  # TASK_RUNLEVEL_HIGHEST
+    assert definition.Principal.LogonType == 3  # TASK_LOGON_INTERACTIVE_TOKEN
+    # A resident tray utility must start on battery and never be time-limited.
+    assert definition.Settings.DisallowStartIfOnBatteries is False
+    assert definition.Settings.StopIfGoingOnBatteries is False
+    assert definition.Settings.ExecutionTimeLimit == "PT0S"
+    assert [trigger.kind for trigger in service.triggers] == [9]  # TASK_TRIGGER_LOGON
+    assert service.triggers[0].UserId == "DOMAIN\\user"
+    action = service.actions[0]
+    assert (action.kind, action.Path) == (0, r"C:\Apps\Virelo\Virelo.exe")
+    assert action.WorkingDirectory == r"C:\Apps\Virelo"
+    name, registered, create_flags, _user, _password, logon_type = folder.registrations[0]
+    assert (name, create_flags, logon_type) == ("Virelo", 6, 3)
+    assert registered is definition
+
+
+def test_remove_startup_task_tolerates_only_a_missing_task() -> None:
+    """A missing task is not an uninstall failure, but other errors surface."""
+    from virelo.platform import startup
+
+    class _NotFound(Exception):
+        hresult = -2147024894  # HRESULT 0x80070002.
+
+    class _Denied(Exception):
+        hresult = -2147024891  # HRESULT 0x80070005.
+
+    folder = _FakeTaskFolder()
+    service = _FakeTaskService(folder)
+
+    folder.delete_error = _NotFound()
+    startup.remove_startup_task(dispatch=lambda name: service)
+
+    folder.delete_error = _Denied()
+    with pytest.raises(_Denied):
+        startup.remove_startup_task(dispatch=lambda name: service)
+
+
+@pytest.mark.requires_qt
+def test_sync_startup_shortcut_manages_the_task_and_legacy_link(monkeypatch, tmp_path) -> None:
+    """Enabling registers the elevated task; both directions drop the legacy link."""
+    from virelo.app import window as window_module
+
+    startup_dir = tmp_path / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
+    startup_dir.mkdir(parents=True)
+    legacy = startup_dir / "Virelo.lnk"
+    legacy.write_text("legacy", encoding="utf-8")
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    registered = MagicMock()
+    removed = MagicMock()
+    monkeypatch.setattr(window_module, "register_startup_task", registered)
+    monkeypatch.setattr(window_module, "remove_startup_task", removed)
+
+    window_module.sync_startup_shortcut(True)
+    registered.assert_called_once()
+    removed.assert_not_called()
+    assert not legacy.exists()
+
+    legacy.write_text("legacy", encoding="utf-8")
+    window_module.sync_startup_shortcut(False)
+    removed.assert_called_once()
+    assert not legacy.exists()
+
+
+def test_uninstall_task_helper_reports_missing_task_as_success(monkeypatch) -> None:
+    """Task cleanup exits zero when the task is gone and one on a real failure."""
+    from virelo.app import __main__ as app_main
+    from virelo.platform import startup
+
+    monkeypatch.setattr(startup, "remove_startup_task", MagicMock())
+    assert app_main._remove_startup_task() == 0
+
+    monkeypatch.setattr(startup, "remove_startup_task", MagicMock(side_effect=OSError("denied")))
+    assert app_main._remove_startup_task() == 1
+
+
 @pytest.mark.requires_qt
 def test_startup_reconciliation_reports_saved_but_unsynchronized_state(monkeypatch) -> None:
     """A failed shortcut update is reported accurately and retried on the next launch."""

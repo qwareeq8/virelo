@@ -168,13 +168,15 @@ tree or relabel the x64 output.
 of a machine-wide installation.
 
 **Fix:** Virelo remains a per-machine, administrator installation under 64-bit Program Files. Its
-installer preserves per-user settings, logs, and Explorer recovery backups. During uninstall it
-invokes the installed Virelo executable with `--remove-startup-shortcut` before removing the
-executable. This removes the shortcut for the account running Uninstall, including ordinary
+installer preserves per-user settings, logs, and Explorer recovery backups. Run-at-startup uses an
+elevated logon task in Task Scheduler, so sign-in starts Virelo without a UAC prompt. During
+uninstall the installer invokes the installed Virelo executable with `--remove-startup-task` in
+the elevated uninstall context to delete that task, and with `--remove-startup-shortcut` to remove
+the legacy per-user Startup link for the account running Uninstall, including ordinary
 same-account UAC elevation. Inno Setup does not support `runasoriginaluser` at uninstall time, so
-over-the-shoulder elevation with another administrator cannot clean the original user's startup
-link automatically. It never enumerates or deletes settings, logs, backups, or startup links from
-other profiles. After a successful folder-view backup, the running application retains the newest
+over-the-shoulder elevation with another administrator cannot clean the original user's legacy
+startup link automatically. It never enumerates or deletes settings, logs, backups, or startup
+links from other profiles. After a successful folder-view backup, the running application retains the newest
 10 matching recovery directories under `%LOCALAPPDATA%\Virelo`; uninstall preserves those retained
 backups.
 

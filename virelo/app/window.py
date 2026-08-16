@@ -19,7 +19,11 @@ from virelo.app.window_hit_test import (
 )
 from virelo.bridge import CaptureGuard, VireloBridge
 from virelo.platform.resources import resource_path
-from virelo.platform.startup import ensure_dispatch, startup_shortcut_spec
+from virelo.platform.startup import (
+    register_startup_task,
+    remove_startup_task,
+    startup_shortcut_spec,
+)
 from virelo.platform.theme import (
     get_windows_theme,
     normalize_theme_mode,
@@ -50,37 +54,31 @@ def get_startup_shortcut_path() -> str:
     return os.path.join(startup_dir, f"{APP_NAME}.lnk")
 
 
-def create_startup_shortcut() -> None:
-    """Create or replace the current user's Virelo startup shortcut."""
-    shortcut_path = get_startup_shortcut_path()
-    script = os.path.abspath(sys.argv[0])
-    frozen = bool(getattr(sys, "frozen", False))
-    target, args = startup_shortcut_spec(sys.executable, script, frozen)
-    wsh = ensure_dispatch("WScript.Shell")
-    os.makedirs(os.path.dirname(shortcut_path), exist_ok=True)
-    shortcut = wsh.CreateShortcut(shortcut_path)
-    shortcut.TargetPath = target
-    shortcut.Arguments = args
-    shortcut.WorkingDirectory = os.path.dirname(target if frozen else script)
-    icon_path = resource_path("icon.ico")
-    if os.path.exists(icon_path):
-        shortcut.IconLocation = icon_path
-    shortcut.Save()
-
-
 def remove_startup_shortcut() -> None:
-    """Remove the current user's Virelo startup shortcut if it exists."""
+    """Remove the legacy current-user Virelo startup shortcut if it exists."""
     shortcut_path = get_startup_shortcut_path()
     if os.path.exists(shortcut_path):
         os.remove(shortcut_path)
 
 
 def sync_startup_shortcut(enabled: bool) -> None:
-    """Make the current-user startup shortcut match the persisted setting."""
+    """Make elevated autostart match the persisted run-at-startup setting.
+
+    Autostart uses a highest-run-level scheduled task, the same mechanism
+    PowerToys uses, so sign-in starts Virelo elevated without a UAC prompt.
+    A Startup-folder shortcut cannot do that for a self-elevating
+    application; any legacy shortcut is removed in both directions so the
+    two mechanisms can never both launch an instance.
+    """
     if enabled:
-        create_startup_shortcut()
+        script = os.path.abspath(sys.argv[0])
+        frozen = bool(getattr(sys, "frozen", False))
+        target, arguments = startup_shortcut_spec(sys.executable, script, frozen)
+        working_directory = os.path.dirname(target if frozen else script)
+        register_startup_task(target, arguments, working_directory)
     else:
-        remove_startup_shortcut()
+        remove_startup_task()
+    remove_startup_shortcut()
 
 
 # ------------------------------------------------------------------------------

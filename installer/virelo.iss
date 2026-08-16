@@ -94,8 +94,12 @@ Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: 
 Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
+; Autostart uses an elevated logon task; deleting it requires administrator
+; rights, so this entry runs in the elevated uninstall context.
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--remove-startup-task"; Flags: runhidden; RunOnceId: "RemoveStartupTask"
 ; Inno Setup cannot recover the original user's token at uninstall time. This
-; removes the shortcut for the account running Uninstall, which is the same
-; profile for ordinary same-account UAC elevation. Over-the-shoulder elevation
-; is documented as requiring manual cleanup in the original profile.
+; removes the legacy per-user startup shortcut for the account running
+; Uninstall, which is the same profile for ordinary same-account UAC
+; elevation. Over-the-shoulder elevation is documented as requiring manual
+; cleanup in the original profile.
 Filename: "{app}\{#MyAppExeName}"; Parameters: "--remove-startup-shortcut"; Flags: runhidden runascurrentuser; RunOnceId: "RemoveCurrentUserStartupShortcut"
