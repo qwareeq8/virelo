@@ -416,6 +416,14 @@ function Get-VireloPipFreezeSnapshot {
         $packages |
             ForEach-Object { $_.ToString().Trim() } |
             Where-Object { $_ } |
+            ForEach-Object {
+                # Virelo itself is installed editable. pip freeze renders that
+                # entry with the current commit hash, or a bare path when git
+                # is unavailable, so the raw line would invalidate the marker
+                # on every commit. The provenance check protects the
+                # third-party closure, so normalize the project's own entry.
+                if ($_ -match '^-e .*virelo') { "-e virelo" } else { $_ }
+            } |
             Sort-Object
     )
     $text = if ($normalized.Count -gt 0) {
