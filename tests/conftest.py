@@ -106,6 +106,22 @@ import pytest
 from virelo.app.config import DEFAULTS
 
 
+def pytest_collection_modifyitems(config, items):
+    """Skip ``requires_qt`` tests when PySide6 is stubbed because it is absent.
+
+    Linux CI excludes these tests with a marker filter. A direct pytest run on
+    a machine without PySide6 must skip them as well, rather than run them
+    against the minimal stubs above and fail with misleading import errors.
+    An installed but broken PySide6 still fails loudly during stub setup.
+    """
+    if "PySide6" not in _MISSING_NATIVE_ROOTS:
+        return
+    skip_qt = pytest.mark.skip(reason="PySide6 is not installed; a real Qt runtime is required.")
+    for item in items:
+        if "requires_qt" in item.keywords:
+            item.add_marker(skip_qt)
+
+
 class MockSettings:
     """In-memory Settings replacement for unit tests. No QSettings/Qt dependency."""
 
