@@ -115,6 +115,35 @@ def test_reviewed_foreign_platform_import_is_classified_benign(tmp_path: Path) -
             "win32com.client.makepy (delayed, conditional)\n",
             "unused-pythonwin-ui",
         ),
+        # The Python 3.14 standard library moved the POSIX-only branches of
+        # pathlib into the package and the new pathlib._os helper, and pulls
+        # netrc and _scproxy into the modulegraph.
+        (
+            "missing module named pwd - imported by posixpath (delayed, conditional, "
+            "optional), subprocess (delayed, conditional, optional), shutil (delayed, "
+            "optional), tarfile (optional), pathlib (optional), netrc (delayed, optional)\n",
+            "foreign-platform-optional-import",
+        ),
+        (
+            "missing module named grp - imported by subprocess (delayed, conditional, "
+            "optional), shutil (delayed, optional), tarfile (optional), pathlib (optional)\n",
+            "foreign-platform-optional-import",
+        ),
+        (
+            "missing module named posix - imported by os (conditional, optional), "
+            "posixpath (optional), shutil (conditional), "
+            "importlib._bootstrap_external (conditional), pathlib._os (optional)\n",
+            "foreign-platform-optional-import",
+        ),
+        (
+            "missing module named fcntl - imported by subprocess (optional), "
+            "pathlib._os (optional), keyboard._nixcommon (delayed)\n",
+            "foreign-platform-optional-import",
+        ),
+        (
+            "missing module named _scproxy - imported by urllib.request (conditional)\n",
+            "foreign-platform-optional-import",
+        ),
     ),
 )
 def test_real_reviewed_modulegraph_branches_are_benign(

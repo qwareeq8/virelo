@@ -132,23 +132,34 @@ WINDOWS_SYSTEM_LIBRARIES = frozenset(
     }
 )
 BENIGN_MISSING_MODULE_RULES: dict[str, tuple[frozenset[str] | None, str, str]] = {
+    # The pathlib importer names cover both stdlib layouts: Python 3.13 keeps
+    # the POSIX branches in pathlib._local, while Python 3.14 imports them from
+    # the pathlib package and the new pathlib._os helper module.
     "pwd": (
-        frozenset({"posixpath", "shutil", "tarfile", "pathlib._local", "subprocess"}),
+        frozenset(
+            {"posixpath", "shutil", "tarfile", "pathlib", "pathlib._local", "subprocess", "netrc"}
+        ),
         "foreign-platform-optional-import",
         "The module is POSIX-only, and every importer is a reviewed "
         "cross-platform standard-library branch.",
     ),
     "grp": (
-        frozenset({"shutil", "tarfile", "pathlib._local", "subprocess"}),
+        frozenset({"shutil", "tarfile", "pathlib", "pathlib._local", "subprocess"}),
         "foreign-platform-optional-import",
         "The module is POSIX-only, and every importer is a reviewed "
         "cross-platform standard-library branch.",
     ),
     "posix": (
-        frozenset({"os", "posixpath", "shutil", "importlib._bootstrap_external"}),
+        frozenset({"os", "posixpath", "shutil", "importlib._bootstrap_external", "pathlib._os"}),
         "foreign-platform-optional-import",
         "The POSIX implementation is unavailable by design in a Windows build, and every "
         "importer is a reviewed standard-library platform branch.",
+    ),
+    "_scproxy": (
+        frozenset({"urllib.request"}),
+        "foreign-platform-optional-import",
+        "The module is the macOS proxy-resolution branch of urllib.request and does not "
+        "exist on Windows.",
     ),
     "resource": (
         frozenset({"posix"}),
@@ -161,9 +172,9 @@ BENIGN_MISSING_MODULE_RULES: dict[str, tuple[frozenset[str] | None, str, str]] =
         "The extension belongs to subprocess's POSIX implementation and is not loaded on Windows.",
     ),
     "fcntl": (
-        frozenset({"subprocess", "keyboard._nixcommon"}),
+        frozenset({"subprocess", "pathlib._os", "keyboard._nixcommon"}),
         "foreign-platform-optional-import",
-        "The module is used only by reviewed POSIX subprocess and keyboard branches.",
+        "The module is used only by reviewed POSIX standard-library and keyboard branches.",
     ),
     "AppKit": (
         frozenset({"keyboard._darwinkeyboard"}),
